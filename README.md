@@ -240,10 +240,10 @@ Switched to Haiku. How can I help?
 
 ## Chaining Templates
 
-The `/chain` command runs multiple templates sequentially. Each step switches to its own model, injects its own skill, and the conversation context carries forward between steps.
+The `/chain-prompts` command runs multiple templates sequentially. Each step switches to its own model, injects its own skill, and the conversation context carries forward between steps.
 
 ```
-/chain analyze-code -> fix-plan -> summarize -- src/main.ts
+/chain-prompts analyze-code -> fix-plan -> summarize -- src/main.ts
 ```
 
 This runs `analyze-code` first, then `fix-plan` (which sees the analysis in conversation context), then `summarize`. The `-- src/main.ts` provides shared args substituted into every template's `$@`.
@@ -251,7 +251,7 @@ This runs `analyze-code` first, then `fix-plan` (which sees the analysis in conv
 Each step can also receive its own args, overriding the shared args for that step:
 
 ```
-/chain analyze-code "look at error handling" -> fix-plan "focus on perf" -> summarize
+/chain-prompts analyze-code "look at error handling" -> fix-plan "focus on perf" -> summarize
 ```
 
 Here `analyze-code` gets `$@ = "look at error handling"`, `fix-plan` gets `$@ = "focus on perf"`, and `summarize` has no per-step args so it falls back to the shared args (empty in this case, but conversation context from prior steps is usually enough).
@@ -259,7 +259,7 @@ Here `analyze-code` gets `$@ = "look at error handling"`, `fix-plan` gets `$@ = 
 You can mix both:
 
 ```
-/chain analyze-code "error handling" -> fix-plan -> summarize -- src/main.ts
+/chain-prompts analyze-code "error handling" -> fix-plan -> summarize -- src/main.ts
 ```
 
 Step 1 uses its per-step args (`"error handling"`), steps 2 and 3 fall back to the shared args (`"src/main.ts"`).

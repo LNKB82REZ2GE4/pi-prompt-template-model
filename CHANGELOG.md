@@ -2,12 +2,18 @@
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-02-08
+
+### Fixed
+
+- Prompts map now initialized at extension load instead of waiting for `session_start`. Commands invoked before the first session event no longer fail with stale empty state.
+
 ## [0.3.0] - 2026-02-08
 
 ### Added
 
-- **Chain command**: `/chain` orchestrates multiple prompt templates sequentially, each with its own model, skill, and thinking level. Conversation context flows between steps naturally.
-- Per-step args override shared args: `/chain analyze "error handling" -> fix-plan "focus on perf" -> summarize -- src/main.ts`
+- **Chain command**: `/chain-prompts` orchestrates multiple prompt templates sequentially, each with its own model, skill, and thinking level. Conversation context flows between steps naturally.
+- Per-step args override shared args: `/chain-prompts analyze "error handling" -> fix-plan "focus on perf" -> summarize -- src/main.ts`
 - Mid-chain failure rolls back to the original model and thinking level
 - Step progress notifications show which step is running
 - State isolation: chain uses local variables, never interferes with single-command restore behavior

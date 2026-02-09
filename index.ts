@@ -516,9 +516,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 	// Initialize: register commands for prompts with model frontmatter
 	const initialCwd = process.cwd();
-	const initialPrompts = loadPromptsWithModel(initialCwd);
+	prompts = loadPromptsWithModel(initialCwd);
 
-	for (const [name, prompt] of initialPrompts) {
+	for (const [name, prompt] of prompts) {
 		// Build source label with subdir namespace
 		let sourceLabel: string;
 		if (prompt.subdir) {
@@ -594,7 +594,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		});
 	}
 
-	pi.registerCommand("chain", {
+	pi.registerCommand("chain-prompts", {
 		description: "Chain prompt templates sequentially [template -> template -> ...]",
 		handler: async (args, ctx) => {
 			let templatesPart = args;

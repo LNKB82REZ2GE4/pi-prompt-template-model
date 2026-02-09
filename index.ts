@@ -376,6 +376,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	let previousModel: Model<any> | undefined;
 	let previousThinking: ThinkingLevel | undefined;
 	let pendingSkill: { name: string; cwd: string } | undefined;
+	let chainActive = false;
 	
 	// Register custom message renderer for skill-loaded messages
 	pi.registerMessageRenderer<SkillLoadedDetails>("skill-loaded", renderSkillLoaded);
@@ -493,6 +494,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 	// Restore model and thinking level after the agent finishes responding
 	pi.on("agent_end", async (_event, ctx) => {
+		if (chainActive) return;
 		const restoredParts: string[] = [];
 
 		if (previousModel) {
@@ -591,4 +593,104 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			},
 		});
 	}
+
+	pi.registerCommand("chain", {
+		description: "Chain prompt templates sequentially [template -> template -> ...]",
+		handler: async (args, ctx) => {
+			let templatesPart = args;
+			let argsPart = "";
+			const argsSeparator = args.indexOf(" -- ");
+			if (argsSeparator !== -1) {
+				templatesPart = args.slice(0, argsSeparator);
+				argsPart = args.slice(argsSeparator + 4);
+			}
+
+			const steps = templatesPart
+				.split("->")
+				.map(s => s.trim())
+				.filter(Boolean)
+				.map(segment => {
+					const tokens = parseCommandArgs(segment);
+					return { name: tokens[0], args: tokens.slice(1) };
+				});
+
+			if (steps.length === 0) {
+				ctx.ui.notify("No templates specified", "error");
+				return;
+			}
+
+			const missingTemplates = steps.filter(s => !prompts.has(s.name));
+			if (missingTemplates.length > 0) {
+				ctx.ui.notify(`Templates not found: ${missingTemplates.map(s => s.name).join(", ")}`, "error");
+				return;
+			}
+
+			const templates = steps.map(s => ({ ...prompts.get(s.name)!, stepArgs: s.args }));
+			const originalModel = ctx.model;
+			const originalThinking = pi.getThinkingLevel();
+			const parsedArgs = parseCommandArgs(argsPart);
+
+			try {
+				chainActive = true;
+
+				for (const [index, tmpl] of templates.entries()) {
+					const stepNumber = index + 1;
+					const modelLabel = tmpl.models
+						.map(m => m.split("/").pop() || m)
+						.join("|");
+					const skillLabel = tmpl.skill ? ` +${tmpl.skill}` : "";
+					const thinkingLabel = tmpl.thinking ? ` ${tmpl.thinking}` : "";
+					ctx.ui.notify(
+						`Step ${stepNumber}/${templates.length}: ${tmpl.name} [${modelLabel}${thinkingLabel}${skillLabel}]`,
+						"info"
+					);
+
+					const result = await resolveAndSwitch(tmpl.models, ctx);
+					if (!result) {
+						ctx.ui.notify(`Step ${stepNumber}/${templates.length} failed: ${tmpl.name}`, "error");
+						if (originalModel) {
+							await pi.setModel(originalModel);
+						}
+						if (originalThinking !== undefined) {
+							pi.setThinkingLevel(originalThinking);
+						}
+						return;
+					}
+
+					if (tmpl.thinking) {
+						pi.setThinkingLevel(tmpl.thinking);
+					}
+
+					pendingSkill = undefined;
+					if (tmpl.skill) {
+						pendingSkill = { name: tmpl.skill, cwd: ctx.cwd };
+					}
+
+					const effectiveArgs = tmpl.stepArgs.length > 0 ? tmpl.stepArgs : parsedArgs;
+					const expandedContent = substituteArgs(tmpl.content, effectiveArgs);
+					pi.sendUserMessage(expandedContent);
+
+					while (ctx.isIdle()) {
+						await new Promise(resolve => setTimeout(resolve, 10));
+					}
+					await ctx.waitForIdle();
+				}
+
+				const restoredParts: string[] = [];
+				if (originalModel) {
+					restoredParts.push(originalModel.id);
+					await pi.setModel(originalModel);
+				}
+				if (originalThinking !== undefined) {
+					restoredParts.push(`thinking:${originalThinking}`);
+					pi.setThinkingLevel(originalThinking);
+				}
+				if (restoredParts.length > 0) {
+					ctx.ui.notify(`Restored to ${restoredParts.join(", ")}`, "info");
+				}
+			} finally {
+				chainActive = false;
+			}
+		},
+	});
 }

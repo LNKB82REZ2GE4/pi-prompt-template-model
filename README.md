@@ -238,6 +238,34 @@ restore: false
 Switched to Haiku. How can I help?
 ```
 
+## Chaining Templates
+
+The `/chain` command runs multiple templates sequentially. Each step switches to its own model, injects its own skill, and the conversation context carries forward between steps.
+
+```
+/chain analyze-code -> fix-plan -> summarize -- src/main.ts
+```
+
+This runs `analyze-code` first, then `fix-plan` (which sees the analysis in conversation context), then `summarize`. The `-- src/main.ts` provides shared args substituted into every template's `$@`.
+
+Each step can also receive its own args, overriding the shared args for that step:
+
+```
+/chain analyze-code "look at error handling" -> fix-plan "focus on perf" -> summarize
+```
+
+Here `analyze-code` gets `$@ = "look at error handling"`, `fix-plan` gets `$@ = "focus on perf"`, and `summarize` has no per-step args so it falls back to the shared args (empty in this case, but conversation context from prior steps is usually enough).
+
+You can mix both:
+
+```
+/chain analyze-code "error handling" -> fix-plan -> summarize -- src/main.ts
+```
+
+Step 1 uses its per-step args (`"error handling"`), steps 2 and 3 fall back to the shared args (`"src/main.ts"`).
+
+The chain captures your current model and thinking level before starting, and restores them when the chain finishes (or if any step fails mid-chain). Individual template `restore` settings are ignored during chain execution.
+
 ## Autocomplete Display
 
 Commands show model, thinking level, and skill in the description:
@@ -264,3 +292,5 @@ The model switches, skill injects, agent responds, and output prints to stdout. 
 
 - Templates discovered at startup. Restart pi after adding/modifying.
 - Model restore state is in-memory. Closing pi mid-response loses restore state.
+- Only templates with a `model` field can be chained. Templates without `model` are handled by pi core and invisible to this extension.
+- Per-step args containing a literal `->` will be misinterpreted as a step separator. Use shared `--` args or a template file instead.

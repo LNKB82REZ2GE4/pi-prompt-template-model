@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-02-08
+
+### Added
+
+- **Chain command**: `/chain` orchestrates multiple prompt templates sequentially, each with its own model, skill, and thinking level. Conversation context flows between steps naturally.
+- Per-step args override shared args: `/chain analyze "error handling" -> fix-plan "focus on perf" -> summarize -- src/main.ts`
+- Mid-chain failure rolls back to the original model and thinking level
+- Step progress notifications show which step is running
+- State isolation: chain uses local variables, never interferes with single-command restore behavior
+
 ## [0.2.1] - 2026-01-31
 
 ### Fixed

@@ -316,7 +316,7 @@ The `/chain-prompts` command runs multiple templates sequentially. Each step swi
 /chain-prompts analyze-code -> fix-plan -> summarize -- src/main.ts
 ```
 
-This runs `analyze-code` first, then `fix-plan` (which sees the analysis in conversation context), then `summarize`. The `-- src/main.ts` provides shared args substituted into every template's `$@`.
+This runs `analyze-code` first, then `fix-plan` (which sees the analysis in conversation context), then `summarize`. The ` -- src/main.ts` part is optional. The literal ` -- ` separator means "shared args start here": everything after it is passed to each step as `$@`, unless that step already has its own inline args.
 
 Each step can also receive its own args, overriding the shared args for that step:
 
@@ -440,14 +440,15 @@ Review the codebase and improve code quality. $@
 Chains support the same looping forms:
 
 ```
+/chain-prompts analyze -> fix --loop 3
+/chain-prompts analyze -> fix --loop=3
+/chain-prompts analyze -> fix --loop
+/chain-prompts analyze -> fix --loop 3 --fresh
+/chain-prompts analyze -> fix --loop 3 --no-converge
 /chain-prompts analyze -> fix --loop 3 -- src/main.ts
-/chain-prompts analyze -> fix --loop=3 -- src/main.ts
-/chain-prompts analyze -> fix --loop -- src/main.ts
-/chain-prompts analyze -> fix --loop 3 --fresh -- src/main.ts
-/chain-prompts analyze -> fix --loop 3 --no-converge -- src/main.ts
 ```
 
-This runs the full chain (analyze → fix) three times. Convergence detection applies across all steps in each iteration — if no step made file changes, the loop stops. Each iteration re-reads prompts from disk, so template edits take effect between iterations. The status bar shows `loop 2/3` during execution.
+This runs the full chain (analyze → fix) three times. The final example adds optional shared args: ` -- src/main.ts` means "pass `src/main.ts` to any step that doesn't already have its own args." If you don't need shared args, leave that part out entirely. Convergence detection applies across all steps in each iteration — if no step made file changes, the loop stops. Each iteration re-reads prompts from disk, so template edits take effect between iterations. The status bar shows `loop 2/3` during execution.
 
 ## Agent Tool
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Clarified the README chain examples so the optional ` -- ` shared-args separator is clearly distinct from loop flags like `--loop`, `--fresh`, and `--no-converge`.
+
 ## [0.5.0] - 2026-03-17
 
 ### Added

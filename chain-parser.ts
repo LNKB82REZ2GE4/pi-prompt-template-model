@@ -135,12 +135,13 @@ export function parseChainSteps(args: string): ParsedChainSteps {
 			invalidSegments.push(rawSegment);
 			continue;
 		}
-		const tokens = parseCommandArgs(segment);
+		const { cleanedSegment, loopCount } = extractStepLoopCount(segment);
+		const tokens = parseCommandArgs(cleanedSegment);
 		if (tokens.length === 0) {
 			invalidSegments.push(segment);
 			continue;
 		}
-		steps.push({ name: tokens[0], args: tokens.slice(1) });
+		steps.push({ name: tokens[0], args: tokens.slice(1), loopCount });
 	}
 
 	return { steps, sharedArgs: parseCommandArgs(argsPart), invalidSegments };

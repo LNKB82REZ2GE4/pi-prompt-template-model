@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-03-20
+
+### Added
+- Added delegated prompt execution via direct extension event bus communication with `subagent` (`prompt-template:subagent:*` channels), including delegated custom-message persistence for loop summaries and context carry-forward.
+- Added prompt frontmatter support for `subagent` and `inheritContext`, with `inheritContext: true` mapped to delegated fork context.
+- Fork context preamble is handled by the subagent extension directly (via `DEFAULT_FORK_PREAMBLE` in `types.ts`), applying to all fork-context subagent runs universally.
+- Added runtime delegation override flags: `--subagent`, `--subagent=<name>`, and `--subagent:<name>`.
+- Added live progress widget above editor during delegated subagent runs showing elapsed time, tool count, tokens, current tool, and task preview — matching the native subagent tool card layout.
+- Added styled completion card with task preview, tool call history, expandable output (Ctrl+O), and usage stats footer.
+
+### Changed
+- Updated provider priority for ambiguous bare model IDs to prefer `openai-codex` before `anthropic`, `github-copilot`, and `openrouter`.
+- Updated loop convergence and fresh-summary analysis to account for delegated subagent message payloads.
+
+### Fixed
+- Delegated start-time hangs now fail fast with explicit timeout errors when a subagent run never emits a start signal.
+- Delegated runs no longer treat arbitrary escape-sequence-bearing terminal input as an Esc cancellation signal; only literal Esc cancels.
+- Chain and loop restore paths now use live runtime model/thinking state during cleanup, preventing skipped restore on mid-step failures.
+
 ## [0.6.0] - 2026-03-19
 
 ### Changed

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractLoopCount, extractLoopFlags, parseCommandArgs, substituteArgs } from "../args.js";
+import { extractLoopCount, extractLoopFlags, extractSubagentOverride, parseCommandArgs, substituteArgs } from "../args.js";
 
 test("parseCommandArgs respects quoted segments", () => {
 	assert.deepEqual(parseCommandArgs('alpha "two words" beta'), ["alpha", "two words", "beta"]);
@@ -168,5 +168,30 @@ test("extractLoopFlags handles newline-separated flags", () => {
 		args: "task",
 		fresh: true,
 		converge: false,
+	});
+});
+
+test("extractSubagentOverride parses bare and named runtime overrides", () => {
+	assert.deepEqual(extractSubagentOverride("--subagent task"), {
+		args: "task",
+		override: { enabled: true },
+	});
+	assert.deepEqual(extractSubagentOverride("task --subagent:worker"), {
+		args: "task",
+		override: { enabled: true, agent: "worker" },
+	});
+	assert.deepEqual(extractSubagentOverride("task --subagent=reviewer"), {
+		args: "task",
+		override: { enabled: true, agent: "reviewer" },
+	});
+});
+
+test("extractSubagentOverride ignores quoted flags and strips repeated overrides", () => {
+	assert.deepEqual(extractSubagentOverride('"--subagent" task'), {
+		args: '"--subagent" task',
+	});
+	assert.deepEqual(extractSubagentOverride("task --subagent --subagent:worker"), {
+		args: "task",
+		override: { enabled: true, agent: "worker" },
 	});
 });

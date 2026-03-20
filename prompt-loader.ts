@@ -43,6 +43,8 @@ export interface PromptWithModel {
 	fresh?: boolean;
 	loop?: number;
 	converge?: boolean;
+	subagent?: true | string;
+	inheritContext?: boolean;
 	source: PromptSource;
 	subdir?: string;
 	filePath: string;
@@ -293,6 +295,67 @@ function normalizeConverge(
 	return true;
 }
 
+function normalizeSubagent(
+	value: unknown,
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): true | string | undefined {
+	if (value === undefined) return undefined;
+	if (value === true) return true;
+	if (value === false) return undefined;
+	if (typeof value !== "string") {
+		diagnostics.push(
+			createDiagnostic(
+				"invalid-subagent",
+				filePath,
+				source,
+				`Ignoring invalid subagent value in ${filePath}: frontmatter field "subagent" must be true or a non-empty string.`,
+			),
+		);
+		return undefined;
+	}
+
+	const normalized = value.trim();
+	if (!normalized) {
+		diagnostics.push(
+			createDiagnostic(
+				"invalid-subagent",
+				filePath,
+				source,
+				`Ignoring invalid subagent value in ${filePath}: frontmatter field "subagent" must be true or a non-empty string.`,
+			),
+		);
+		return undefined;
+	}
+	return normalized;
+}
+
+function normalizeInheritContext(
+	value: unknown,
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): boolean {
+	if (value === undefined) return false;
+	if (typeof value === "boolean") return value;
+	if (typeof value === "string") {
+		const normalized = value.trim().toLowerCase();
+		if (normalized === "true") return true;
+		if (normalized === "false") return false;
+	}
+
+	diagnostics.push(
+		createDiagnostic(
+			"invalid-inherit-context",
+			filePath,
+			source,
+			`Using default inheritContext=false for ${filePath}: frontmatter field "inheritContext" must be true or false.`,
+		),
+	);
+	return false;
+}
+
 function normalizeChain(
 	value: unknown,
 	filePath: string,
@@ -436,6 +499,29 @@ function loadPromptsWithModelFromDir(
 				if (!frontmatter) continue;
 				const { body } = parsed;
 				const chain = normalizeChain(frontmatter.chain, fullPath, source, diagnostics);
+				let subagent = normalizeSubagent(frontmatter.subagent, fullPath, source, diagnostics);
+				const inheritContext = normalizeInheritContext(frontmatter.inheritContext, fullPath, source, diagnostics);
+				if (chain && subagent !== undefined) {
+					diagnostics.push(
+						createDiagnostic(
+							"invalid-subagent-chain",
+							fullPath,
+							source,
+							`Ignoring subagent in ${fullPath}: frontmatter fields "chain" and "subagent" cannot be combined.`,
+						),
+					);
+					subagent = undefined;
+				}
+				if (subagent === undefined && inheritContext) {
+					diagnostics.push(
+						createDiagnostic(
+							"invalid-inherit-context",
+							fullPath,
+							source,
+							`Ignoring inheritContext in ${fullPath}: frontmatter field "inheritContext" requires "subagent".`,
+						),
+					);
+				}
 				const hasModelField = Object.hasOwn(frontmatter, "model");
 				const parsedModels = chain ? [] : normalizeModelSpecs(frontmatter.model, fullPath, source, diagnostics);
 				if (!chain && hasModelField && !parsedModels) continue;
@@ -454,6 +540,7 @@ function loadPromptsWithModelFromDir(
 					continue;
 				}
 
+				const safeInheritContext = subagent !== undefined && inheritContext;
 				const description = normalizeStringField("description", frontmatter.description, fullPath, source, diagnostics) ?? "";
 				const skill = chain ? undefined : normalizeStringField("skill", frontmatter.skill, fullPath, source, diagnostics);
 				const thinking = chain ? undefined : normalizeThinking(frontmatter.thinking, fullPath, source, diagnostics);
@@ -468,6 +555,8 @@ function loadPromptsWithModelFromDir(
 					fresh === true ||
 					loop !== undefined ||
 					converge === false ||
+					subagent !== undefined ||
+					safeInheritContext ||
 					hasModelConditionalDirectives;
 				if (!chain && !hasModelField && !hasExtensionSpecificConfig) {
 					continue;
@@ -485,6 +574,8 @@ function loadPromptsWithModelFromDir(
 					fresh: fresh || undefined,
 					loop: loop || undefined,
 					converge: converge === false ? false : undefined,
+					subagent,
+					inheritContext: safeInheritContext || undefined,
 					source,
 					subdir: subdir || undefined,
 					filePath: fullPath,
@@ -567,7 +658,9 @@ export function buildPromptCommandDescription(prompt: PromptWithModel): string {
 	const skillLabel = prompt.skill ? ` +${prompt.skill}` : "";
 	const thinkingLabel = prompt.thinking ? ` ${prompt.thinking}` : "";
 	const loopLabel = prompt.loop ? ` loop:${prompt.loop}` : "";
-	const details = `[${modelLabel}${thinkingLabel}${skillLabel}${loopLabel}] ${sourceLabel}`;
+	const subagentLabel = prompt.subagent ? ` subagent:${prompt.subagent === true ? "delegate" : prompt.subagent}` : "";
+	const inheritContextLabel = prompt.inheritContext ? " fork" : "";
+	const details = `[${modelLabel}${thinkingLabel}${skillLabel}${loopLabel}${subagentLabel}${inheritContextLabel}] ${sourceLabel}`;
 	return prompt.description ? `${prompt.description} ${details}` : details;
 }
 

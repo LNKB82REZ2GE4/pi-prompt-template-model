@@ -2,7 +2,7 @@ import type { Model } from "@mariozechner/pi-ai";
 import type { ModelRegistry } from "@mariozechner/pi-coding-agent";
 import type { ResolvedModelRef } from "./template-conditionals.js";
 
-const PREFERRED_PROVIDERS = ["anthropic", "github-copilot", "openrouter"];
+const PREFERRED_PROVIDERS = ["openai-codex", "anthropic", "github-copilot", "openrouter"];
 
 export interface SelectedModelCandidate {
 	model: Model<any>;

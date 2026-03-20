@@ -130,3 +130,14 @@ test("selectModelCandidate prefers a higher-priority OAuth-backed provider over 
 	assert.deepEqual(selected?.model, models[1]);
 	assert.equal(selected?.alreadyActive, false);
 });
+
+test("selectModelCandidate prioritizes openai-codex for ambiguous bare ids", async () => {
+	const models = [
+		{ provider: "anthropic", id: "gpt-5.2" },
+		{ provider: "openai-codex", id: "gpt-5.2" },
+		{ provider: "openrouter", id: "gpt-5.2" },
+	];
+	const registry = createRegistry(models, models);
+	const selected = await selectModelCandidate(["gpt-5.2"], undefined, registry as never);
+	assert.deepEqual(selected?.model, models[1]);
+});

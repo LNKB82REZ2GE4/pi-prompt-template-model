@@ -47,6 +47,14 @@ pi install npm:pi-prompt-template-model
 
 Restart pi to load the extension.
 
+For delegated subagent execution (`subagent` and `inheritContext` frontmatter), install [pi-subagents](https://github.com/nicobailon/pi-subagents/) separately:
+
+```bash
+pi install npm:pi-subagents
+```
+
+pi-subagents is optional — everything else works without it. If you use `subagent: true` in a prompt template without pi-subagents installed, execution fails fast with a clear error.
+
 ## Quick Start
 
 Add `model` (or omit it to inherit the current session model) and optionally `skill` to any prompt template:
@@ -82,6 +90,43 @@ $@
 
 Here `skill: surf` loads `~/.pi/agent/skills/surf/SKILL.md` and injects its content as a context message on the next turn before the agent handles your task. No decision-making, no read tool, just immediate expertise. It's a forcing function for when you know exactly what workflow the agent needs.
 
+## Delegated Subagent Execution
+
+You can delegate a prompt template directly to the `subagent` extension without metaprompted tool-call instructions.
+
+```markdown
+---
+model: anthropic/claude-sonnet-4-20250514
+subagent: true
+---
+Review and simplify this code: $@
+```
+
+`subagent: true` uses the default `worker` agent. To target a specific agent, set a string value:
+
+```markdown
+---
+model: anthropic/claude-sonnet-4-20250514
+subagent: reviewer
+inheritContext: true
+---
+Audit this diff for correctness and edge cases: $@
+```
+
+`inheritContext: true` maps to delegated `context: "fork"`. It is valid only when `subagent` is configured.
+
+Forked subagents receive a default preamble (from the subagent extension's `DEFAULT_FORK_PREAMBLE`) that anchors them to the task and prevents them from continuing the parent conversation.
+
+During execution, a live progress widget appears above the editor showing elapsed time, tool count, token usage, and the current/last tool — matching the native subagent tool card layout. The widget updates in real-time and clears when the run completes, replaced by a styled completion card with task preview, tool call history, output, and usage stats.
+
+You can override delegation at runtime per invocation:
+
+- `--subagent`
+- `--subagent=<name>`
+- `--subagent:<name>`
+
+Runtime flags take precedence for that invocation only. Bare `--subagent` keeps template agent when present, otherwise defaults to `worker`.
+
 ## Frontmatter Fields
 
 | Field | Required | Default | Description |
@@ -90,6 +135,9 @@ Here `skill: surf` loads `~/.pi/agent/skills/surf/SKILL.md` and injects its cont
 | `chain` | Conditional | - | Chain declaration (`step -> step --loop 2`) for orchestration templates; body is ignored |
 | `skill` | No | - | Skill name to inject as next-turn context message |
 | `thinking` | No | - | Thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `subagent` | No | - | Delegate execution to subagent mode (`true` for default `worker`, or explicit agent name string) |
+| `inheritContext` | No | `false` | Only with `subagent`; when `true`, delegates with subagent `context: "fork"` |
+
 | `description` | No | - | Shown in autocomplete |
 | `restore` | No | `true` | Restore previous model and thinking level after response |
 | `fresh` | No | `false` | Collapse context between loop iterations (applies when looping via `--loop` or frontmatter `loop`) |
@@ -469,6 +517,8 @@ Once enabled, the agent sees `run-prompt` in its tool list and can call it with 
 ```
 run-prompt({ command: "deslop --loop 5 --fresh" })
 run-prompt({ command: "deslop --loop" })
+run-prompt({ command: "deslop --subagent" })
+run-prompt({ command: "deslop --subagent:reviewer" })
 run-prompt({ command: "chain-prompts analyze -> fix --loop 3" })
 ```
 
@@ -514,4 +564,5 @@ The model switches, a skill context message is injected, the agent responds, and
 - Model restore state is in-memory. Closing pi mid-response loses restore state.
 - Model-less templates are only managed by this extension when they use extension features (for example `skill`, `thinking`, loop flags, or inline `<if-model ...>`). Plain prompt templates without extension features stay with pi's default prompt loader to avoid command conflicts.
 - In chains, model-less steps inherit the chain-start model snapshot, not the immediately previous step model. This is intentional for deterministic behavior.
+- Delegated `subagent` prompts require [pi-subagents](https://github.com/nicobailon/pi-subagents/) (`pi install npm:pi-subagents`).
 - The `run-prompt` tool must be explicitly enabled with `/prompt-tool on` before the agent can use it.

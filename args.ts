@@ -11,6 +11,16 @@ export interface LoopFlags {
 	converge: boolean;
 }
 
+export interface SubagentOverride {
+	enabled: true;
+	agent?: string;
+}
+
+export interface SubagentOverrideExtraction {
+	args: string;
+	override?: SubagentOverride;
+}
+
 export function extractLoopCount(argsString: string): LoopExtraction | null {
 	let loopCount: number | null = null;
 	let loopFound = false;
@@ -150,6 +160,58 @@ export function extractLoopFlags(argsString: string): LoopFlags {
 	}
 
 	return { args: cleaned.trim(), fresh, converge: !noConverge };
+}
+
+export function extractSubagentOverride(argsString: string): SubagentOverrideExtraction {
+	let override: SubagentOverride | undefined;
+	const tokensToRemove: Array<{ start: number; end: number }> = [];
+
+	let i = 0;
+	while (i < argsString.length) {
+		const char = argsString[i];
+
+		if (char === '"' || char === "'") {
+			const quote = char;
+			i++;
+			while (i < argsString.length && argsString[i] !== quote) i++;
+			if (i < argsString.length) i++;
+			continue;
+		}
+
+		if (/\s/.test(char)) {
+			i++;
+			continue;
+		}
+
+		const tokenStart = i;
+		while (i < argsString.length && !/\s/.test(argsString[i])) i++;
+		const token = argsString.slice(tokenStart, i);
+
+		if (token === "--subagent") {
+			tokensToRemove.push({ start: tokenStart, end: i });
+			override = { enabled: true };
+			continue;
+		}
+
+		if (token.startsWith("--subagent=") || token.startsWith("--subagent:")) {
+			tokensToRemove.push({ start: tokenStart, end: i });
+			const value = token.includes("=") ? token.slice("--subagent=".length) : token.slice("--subagent:".length);
+			override = value ? { enabled: true, agent: value } : { enabled: true };
+		}
+	}
+
+	if (!override) return { args: argsString.trim() };
+
+	tokensToRemove.sort((a, b) => b.start - a.start);
+	let cleaned = argsString;
+	for (const { start, end } of tokensToRemove) {
+		cleaned = cleaned.slice(0, start) + cleaned.slice(end);
+	}
+
+	return {
+		args: cleaned.trim(),
+		override,
+	};
 }
 
 export function splitByUnquotedSeparator(input: string, separator: string): string[] {

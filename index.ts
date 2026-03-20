@@ -1,7 +1,7 @@
 import type { Model } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
-import { extractLoopCount, extractLoopFlags, parseCommandArgs } from "./args.js";
+import { extractLoopCount, extractLoopFlags, extractSubagentOverride, parseCommandArgs, type SubagentOverride } from "./args.js";
 import { parseChainSteps, parseChainDeclaration, type ChainStep } from "./chain-parser.js";
 import { generateIterationSummary, didIterationMakeChanges, getIterationEntries } from "./loop-utils.js";
 import { notify, summarizePromptDiagnostics, diagnosticsFingerprint } from "./notifications.js";
@@ -9,6 +9,9 @@ import { preparePromptExecution } from "./prompt-execution.js";
 import { buildPromptCommandDescription, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptWithModel } from "./prompt-loader.js";
 import { renderSkillLoaded, type SkillLoadedDetails } from "./skill-loaded-renderer.js";
 import { createToolManager } from "./tool-manager.js";
+import { executeSubagentPromptStep } from "./subagent-step.js";
+import { PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE } from "./subagent-runtime.js";
+import { renderDelegatedSubagentResult } from "./subagent-renderer.js";
 
 interface LoopState {
 	currentIteration: number;
@@ -37,6 +40,10 @@ type SkillMessageResolution =
 interface ExecutionErrorState {
 	hasError: boolean;
 	error: unknown;
+}
+
+interface PromptStepResult {
+	changed: boolean;
 }
 
 export default function promptModelExtension(pi: ExtensionAPI) {
@@ -72,6 +79,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	}
 
 	pi.registerMessageRenderer<SkillLoadedDetails>("skill-loaded", renderSkillLoaded);
+	pi.registerMessageRenderer(PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE, renderDelegatedSubagentResult);
 
 	function registerPromptCommand(name: string) {
 		pi.registerCommand(name, {
@@ -170,6 +178,78 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		while (ctx.isIdle()) {
 			await new Promise((resolve) => setTimeout(resolve, 10));
 		}
+	}
+
+	function shouldDelegatePrompt(prompt: PromptWithModel, override?: SubagentOverride): boolean {
+		return prompt.subagent !== undefined || override?.enabled === true;
+	}
+
+	async function executePromptStep(
+		prompt: PromptWithModel,
+		args: string[],
+		ctx: ExtensionCommandContext,
+		currentModel: Model<any> | undefined,
+		override?: SubagentOverride,
+		inheritedModel?: Model<any>,
+	): Promise<PromptStepResult | "aborted"> {
+		if (shouldDelegatePrompt(prompt, override)) {
+			const delegated = await executeSubagentPromptStep({
+				pi,
+				prompt,
+				args,
+				ctx,
+				currentModel,
+				override,
+				inheritedModel,
+			});
+			if (!delegated) {
+				throw new Error(`Prompt \`${prompt.name}\` is not configured for delegated execution.`);
+			}
+			return { changed: delegated.changed };
+		}
+
+		const prepared =
+			inheritedModel === undefined
+				? await preparePromptExecution(prompt, args, currentModel, ctx.modelRegistry)
+				: await preparePromptExecution(prompt, args, currentModel, ctx.modelRegistry, { inheritedModel });
+		if (!prepared) {
+			notify(ctx, `No available model from: ${prompt.models.join(", ")}`, "error");
+			return "aborted";
+		}
+		if ("message" in prepared) {
+			if (prepared.warning) notify(ctx, prepared.warning, "warning");
+			notify(ctx, prepared.message, "error");
+			return "aborted";
+		}
+		if (prepared.warning) {
+			notify(ctx, prepared.warning, "warning");
+		}
+
+		const skillResolution = resolveSkillMessage(prompt.skill, ctx.cwd);
+		if (skillResolution.kind === "error") {
+			notify(ctx, skillResolution.error, "error");
+			return "aborted";
+		}
+
+		if (!prepared.selectedModel.alreadyActive) {
+			const switched = await pi.setModel(prepared.selectedModel.model);
+			if (!switched) {
+				notify(ctx, `Failed to switch to model ${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`, "error");
+				return "aborted";
+			}
+			runtimeModel = prepared.selectedModel.model;
+		}
+
+		if (prompt.thinking) {
+			pi.setThinkingLevel(prompt.thinking);
+		}
+		pendingSkillMessage = skillResolution.kind === "ready" ? skillResolution.message : undefined;
+
+		const startId = ctx.sessionManager.getLeafId();
+		pi.sendUserMessage(prepared.content);
+		await waitForTurnStart(ctx);
+		await ctx.waitForIdle();
+		return { changed: didIterationMakeChanges(getIterationEntries(ctx, startId)) };
 	}
 
 	async function restoreSessionState(
@@ -291,6 +371,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		freshFlag: boolean,
 		converge: boolean,
 		ctx: ExtensionCommandContext,
+		subagentOverride?: SubagentOverride,
 	) {
 		refreshPrompts(ctx.cwd, ctx);
 		const initialPrompt = prompts.get(name);
@@ -331,51 +412,24 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					break;
 				}
 
-				const prepared = await preparePromptExecution(prompt, parseCommandArgs(cleanedArgs), currentModel, ctx.modelRegistry);
-				if (!prepared) {
-					notify(ctx, `No available model from: ${prompt.models.join(", ")}`, "error");
-					break;
-				}
-				if ("message" in prepared) {
-					if (prepared.warning) notify(ctx, prepared.warning, "warning");
-					notify(ctx, prepared.message, "error");
-					break;
-				}
-				if (prepared.warning) {
-					notify(ctx, prepared.warning, "warning");
-				}
-
-				const skillResolution = resolveSkillMessage(prompt.skill, ctx.cwd);
-				if (skillResolution.kind === "error") {
-					notify(ctx, skillResolution.error, "error");
-					break;
-				}
-
-				if (!prepared.selectedModel.alreadyActive) {
-					const switched = await pi.setModel(prepared.selectedModel.model);
-					if (!switched) {
-						notify(ctx, `Failed to switch to model ${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`, "error");
-						break;
-					}
-					runtimeModel = prepared.selectedModel.model;
-				}
-				currentModel = prepared.selectedModel.model;
-				currentThinking = pi.getThinkingLevel();
-
-				if (prompt.thinking) {
-					pi.setThinkingLevel(prompt.thinking);
-					currentThinking = pi.getThinkingLevel();
-				}
-
-				pendingSkillMessage = skillResolution.kind === "ready" ? skillResolution.message : undefined;
 				const iterationStartId = ctx.sessionManager.getLeafId();
+				const stepResult = await executePromptStep(
+					prompt,
+					parseCommandArgs(cleanedArgs),
+					ctx,
+					currentModel,
+					subagentOverride,
+				);
+				if (stepResult === "aborted") break;
 
-				pi.sendUserMessage(prepared.content);
-				await waitForTurnStart(ctx);
-				await ctx.waitForIdle();
+				currentModel = getCurrentModel(ctx);
+				currentThinking = pi.getThinkingLevel();
 				completedIterations++;
 
-				if (useConverge && (isUnlimited || effectiveMax > 1) && !didIterationMakeChanges(getIterationEntries(ctx, iterationStartId))) {
+				const iterationChanged = shouldDelegatePrompt(prompt, subagentOverride)
+					? stepResult.changed
+					: didIterationMakeChanges(getIterationEntries(ctx, iterationStartId));
+				if (useConverge && (isUnlimited || effectiveMax > 1) && !iterationChanged) {
 					converged = true;
 					break;
 				}
@@ -398,8 +452,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				shouldRestore,
 				savedModel,
 				savedThinking,
-				currentModel,
-				currentThinking,
+				getCurrentModel(ctx),
+				pi.getThinkingLevel(),
 				loopErrorState,
 				"loop",
 			);
@@ -428,6 +482,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		converge: boolean,
 		shouldRestore: boolean,
 		ctx: ExtensionCommandContext,
+		subagentOverride?: SubagentOverride,
 	) {
 		const validateChainSteps = (): boolean => {
 			const missingTemplates = steps.filter((step) => !prompts.has(step.name));
@@ -481,13 +536,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					if (!validateChainSteps()) break;
 				}
 
-				const iterationStartId = ctx.sessionManager.getLeafId();
 				const templates = steps.map((step) => ({
 					...prompts.get(step.name)!,
 					stepArgs: step.args,
 					stepLoop: step.loopCount ?? 1,
 				}));
 				let aborted = false;
+				let iterationChanged = false;
 
 				for (const [index, template] of templates.entries()) {
 					const stepNumber = index + 1;
@@ -515,63 +570,28 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 							const iterSuffix = stepLoop > 1 ? ` (iter ${stepIteration + 1}/${stepLoop})` : "";
 							notify(ctx, `${loopPrefix}Step ${stepNumber}/${templates.length}: ${template.name}${iterSuffix} ${buildPromptCommandDescription(template)}`, "info");
 
-							const prepared = await preparePromptExecution(template, effectiveArgs, currentModel, ctx.modelRegistry, {
-								inheritedModel: chainInheritedModel,
-							});
-							if (!prepared) {
-								notify(
-									ctx,
-									`Step ${stepNumber}/${templates.length} failed: no available model from ${template.models.join(", ")}`,
-									"error",
-								);
-								aborted = true;
-								break;
-							}
-							if ("message" in prepared) {
-								if (prepared.warning) notify(ctx, prepared.warning, "warning");
-								notify(ctx, `Step ${stepNumber}/${templates.length} failed: ${prepared.message}`, "error");
-								aborted = true;
-								break;
-							}
-							if (prepared.warning) {
-								notify(ctx, prepared.warning, "warning");
-							}
-
-							const skillResolution = resolveSkillMessage(template.skill, ctx.cwd);
-							if (skillResolution.kind === "error") {
-								notify(ctx, `Step ${stepNumber}/${templates.length} failed: ${skillResolution.error}`, "error");
-								aborted = true;
-								break;
-							}
-
-							if (!prepared.selectedModel.alreadyActive) {
-								const switched = await pi.setModel(prepared.selectedModel.model);
-								if (!switched) {
-									notify(
-										ctx,
-										`Step ${stepNumber}/${templates.length} failed: could not switch to ${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`,
-										"error",
-									);
-									aborted = true;
-									break;
-								}
-								runtimeModel = prepared.selectedModel.model;
-							}
-
-							currentModel = prepared.selectedModel.model;
-							currentThinking = pi.getThinkingLevel();
-							if (template.thinking) {
-								pi.setThinkingLevel(template.thinking);
-								currentThinking = pi.getThinkingLevel();
-							}
-							pendingSkillMessage = skillResolution.kind === "ready" ? skillResolution.message : undefined;
-
 							const stepIterationStartId = ctx.sessionManager.getLeafId();
-							pi.sendUserMessage(prepared.content);
-							await waitForTurnStart(ctx);
-							await ctx.waitForIdle();
+							const stepResult = await executePromptStep(
+								template,
+								effectiveArgs,
+								ctx,
+								currentModel,
+								subagentOverride,
+								chainInheritedModel,
+							);
+							if (stepResult === "aborted") {
+								aborted = true;
+								break;
+							}
 
-							if (stepLoop > 1 && template.converge !== false && !didIterationMakeChanges(getIterationEntries(ctx, stepIterationStartId))) {
+							currentModel = getCurrentModel(ctx);
+							currentThinking = pi.getThinkingLevel();
+
+							const stepChanged = shouldDelegatePrompt(template, subagentOverride)
+								? stepResult.changed
+								: didIterationMakeChanges(getIterationEntries(ctx, stepIterationStartId));
+							if (stepChanged) iterationChanged = true;
+							if (stepLoop > 1 && template.converge !== false && !stepChanged) {
 								break;
 							}
 						}
@@ -588,7 +608,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				if (aborted) break;
 				completedIterations++;
 
-				if (useConverge && (isUnlimited || effectiveMax > 1) && !didIterationMakeChanges(getIterationEntries(ctx, iterationStartId))) {
+				if (useConverge && (isUnlimited || effectiveMax > 1) && !iterationChanged) {
 					converged = true;
 					break;
 				}
@@ -612,8 +632,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				shouldRestore,
 				originalModel,
 				originalThinking,
-				currentModel,
-				currentThinking,
+				getCurrentModel(ctx),
+				pi.getThinkingLevel(),
 				chainErrorState,
 				"chain",
 			);
@@ -644,12 +664,15 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			return;
 		}
 
+		const subagent = extractSubagentOverride(args);
+		const argsWithoutSubagent = subagent.args;
+
 		if (prompt.chain) {
-			const loop = extractLoopCount(args);
+			const loop = extractLoopCount(argsWithoutSubagent);
 			let totalIterations: number | null = prompt.loop ?? 1;
 			let fresh = false;
 			let converge = true;
-			let cleanedArgs = args;
+			let cleanedArgs = argsWithoutSubagent;
 
 			if (loop) {
 				totalIterations = loop.loopCount;
@@ -657,7 +680,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				converge = loop.converge;
 				cleanedArgs = loop.args;
 			} else if (prompt.loop !== undefined) {
-				const flags = extractLoopFlags(args);
+				const flags = extractLoopFlags(argsWithoutSubagent);
 				fresh = flags.fresh;
 				converge = flags.converge;
 				cleanedArgs = flags.args;
@@ -681,68 +704,44 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				converge && prompt.converge !== false,
 				prompt.restore,
 				ctx,
+				subagent.override,
 			);
 			return;
 		}
 
-		const loop = extractLoopCount(args);
+		const loop = extractLoopCount(argsWithoutSubagent);
 		if (loop) {
-			await runPromptLoop(name, loop.args, loop.loopCount, loop.fresh, loop.converge, ctx);
+			await runPromptLoop(name, loop.args, loop.loopCount, loop.fresh, loop.converge, ctx, subagent.override);
 			return;
 		}
 
 		if (prompt.loop !== undefined) {
-			const flags = extractLoopFlags(args);
-			await runPromptLoop(name, flags.args, prompt.loop, flags.fresh, flags.converge, ctx);
+			const flags = extractLoopFlags(argsWithoutSubagent);
+			await runPromptLoop(name, flags.args, prompt.loop, flags.fresh, flags.converge, ctx, subagent.override);
 			return;
 		}
 
 		const savedModel = getCurrentModel(ctx);
 		const savedThinking = pi.getThinkingLevel();
-		const prepared = await preparePromptExecution(prompt, parseCommandArgs(args), savedModel, ctx.modelRegistry);
-		if (!prepared) {
-			notify(ctx, `No available model from: ${prompt.models.join(", ")}`, "error");
-			return;
-		}
-		if ("message" in prepared) {
-			if (prepared.warning) notify(ctx, prepared.warning, "warning");
-			notify(ctx, prepared.message, "error");
-			return;
-		}
-		if (prepared.warning) {
-			notify(ctx, prepared.warning, "warning");
-		}
+		const stepResult = await executePromptStep(
+			prompt,
+			parseCommandArgs(argsWithoutSubagent),
+			ctx,
+			savedModel,
+			subagent.override,
+		);
+		if (stepResult === "aborted") return;
 
-		const skillResolution = resolveSkillMessage(prompt.skill, ctx.cwd);
-		if (skillResolution.kind === "error") {
-			notify(ctx, skillResolution.error, "error");
-			return;
-		}
-
-		if (!prepared.selectedModel.alreadyActive) {
-			const switched = await pi.setModel(prepared.selectedModel.model);
-			if (!switched) {
-				notify(ctx, `Failed to switch to model ${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`, "error");
-				return;
-			}
-			runtimeModel = prepared.selectedModel.model;
-		}
-
-		if (prompt.restore && !prepared.selectedModel.alreadyActive) {
-			previousModel = savedModel;
-			previousThinking = savedThinking;
-		}
-		if (prompt.thinking) {
-			if (prompt.restore && previousThinking === undefined && prompt.thinking !== savedThinking) {
+		if (!shouldDelegatePrompt(prompt, subagent.override) && prompt.restore) {
+			const currentModel = getCurrentModel(ctx);
+			if (savedModel && currentModel && !sameModel(savedModel, currentModel)) {
+				previousModel = savedModel;
 				previousThinking = savedThinking;
 			}
-			pi.setThinkingLevel(prompt.thinking);
+			if (prompt.thinking && previousThinking === undefined && prompt.thinking !== savedThinking) {
+				previousThinking = savedThinking;
+			}
 		}
-		pendingSkillMessage = skillResolution.kind === "ready" ? skillResolution.message : undefined;
-
-		pi.sendUserMessage(prepared.content);
-		await waitForTurnStart(ctx);
-		await ctx.waitForIdle();
 	}
 
 	function resetSessionScopedState(ctx: ExtensionContext) {
@@ -840,8 +839,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		storedCommandCtx = ctx;
 		refreshPrompts(ctx.cwd, ctx);
 
-		const loop = extractLoopCount(args);
-		const cleanedArgs = loop ? loop.args : args;
+		const subagent = extractSubagentOverride(args);
+		const loop = extractLoopCount(subagent.args);
+		const cleanedArgs = loop ? loop.args : subagent.args;
 
 		const { steps, sharedArgs, invalidSegments } = parseChainSteps(cleanedArgs);
 		if (invalidSegments.length > 0) {
@@ -853,7 +853,16 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		await runSharedChainExecution(steps, sharedArgs, loop ? loop.loopCount : 1, loop?.fresh === true, loop?.converge ?? true, true, ctx);
+		await runSharedChainExecution(
+			steps,
+			sharedArgs,
+			loop ? loop.loopCount : 1,
+			loop?.fresh === true,
+			loop?.converge ?? true,
+			true,
+			ctx,
+			subagent.override,
+		);
 	}
 
 	refreshPrompts(process.cwd());

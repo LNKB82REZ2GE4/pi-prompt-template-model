@@ -20,6 +20,31 @@ interface PromptExecutionOptions {
 	inheritedModel?: Model<any>;
 }
 
+export interface RenderedPrompt {
+	content?: string;
+	warning?: string;
+	empty?: string;
+}
+
+export function renderPromptForResolvedModel(
+	prompt: Pick<PromptWithModel, "name" | "content">,
+	args: string[],
+	model: Model<any>,
+): RenderedPrompt {
+	const rendered = renderTemplateConditionals(prompt.content, getResolvedModelRef(model), prompt.name);
+	const content = substituteArgs(rendered.content, args);
+	if (content.trim().length === 0) {
+		return {
+			empty: `Prompt \`${prompt.name}\` rendered to an empty message.`,
+			warning: rendered.error,
+		};
+	}
+	return {
+		content,
+		warning: rendered.error,
+	};
+}
+
 function sameModel(a: Model<any> | undefined, b: Model<any> | undefined): boolean {
 	if (!a || !b) return a === b;
 	return a.provider === b.provider && a.id === b.id;
@@ -51,18 +76,17 @@ export async function preparePromptExecution(
 	if (!selectedModel) return undefined;
 	if ("message" in selectedModel) return selectedModel;
 
-	const rendered = renderTemplateConditionals(prompt.content, getResolvedModelRef(selectedModel.model), prompt.name);
-	const content = substituteArgs(rendered.content, args);
-	if (content.trim().length === 0) {
+	const rendered = renderPromptForResolvedModel(prompt, args, selectedModel.model);
+	if (rendered.empty) {
 		return {
-			message: `Prompt \`${prompt.name}\` rendered to an empty message.`,
-			warning: rendered.error,
+			message: rendered.empty,
+			warning: rendered.warning,
 		};
 	}
 
 	return {
 		selectedModel,
-		content,
-		warning: rendered.error,
+		content: rendered.content ?? "",
+		warning: rendered.warning,
 	};
 }

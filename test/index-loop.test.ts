@@ -21,7 +21,24 @@ interface FakeTool {
 class FakePi {
 	commands = new Map<string, FakeCommand>();
 	tools = new Map<string, FakeTool>();
-	events = new Map<string, Array<(event: any, ctx: any) => Promise<any> | any>>();
+	hooks = new Map<string, Array<(event: any, ctx: any) => Promise<any> | any>>();
+	bus = new Map<string, Array<(data: unknown) => void>>();
+	events = {
+		emit: (channel: string, data: unknown) => {
+			for (const handler of this.bus.get(channel) ?? []) {
+				handler(data);
+			}
+		},
+		on: (channel: string, handler: (data: unknown) => void) => {
+			const handlers = this.bus.get(channel) ?? [];
+			handlers.push(handler);
+			this.bus.set(channel, handlers);
+			return () => {
+				const current = this.bus.get(channel) ?? [];
+				this.bus.set(channel, current.filter((candidate) => candidate !== handler));
+			};
+		},
+	};
 	skillCommands: Array<{ name: string; source: "skill"; path?: string }> = [];
 	userMessages: string[] = [];
 	setModelCalls: string[] = [];
@@ -43,20 +60,20 @@ class FakePi {
 	}
 
 	on(event: string, handler: (event: any, ctx: any) => Promise<any> | any) {
-		const handlers = this.events.get(event) ?? [];
+		const handlers = this.hooks.get(event) ?? [];
 		handlers.push(handler);
-		this.events.set(event, handlers);
+		this.hooks.set(event, handlers);
 	}
 
 	async emit(event: string, payload: any, ctx: any) {
-		for (const handler of this.events.get(event) ?? []) {
+		for (const handler of this.hooks.get(event) ?? []) {
 			await handler(payload, ctx);
 		}
 	}
 
 	async emitWithResult(event: string, payload: any, ctx: any) {
 		let combined: Record<string, unknown> | undefined;
-		for (const handler of this.events.get(event) ?? []) {
+		for (const handler of this.hooks.get(event) ?? []) {
 			const result = await handler(payload, ctx);
 			if (!result || typeof result !== "object") continue;
 			combined = { ...(combined ?? {}), ...(result as Record<string, unknown>) };

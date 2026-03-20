@@ -374,6 +374,41 @@ test("buildPromptCommandDescription includes loop metadata", () => {
 	});
 });
 
+test("loadPromptsWithModel parses subagent and inheritContext frontmatter", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "delegated.md"),
+			'---\nmodel: claude-sonnet-4-20250514\nsubagent: worker\ninheritContext: true\n---\nbody',
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("delegated");
+		assert.ok(prompt);
+		assert.equal(prompt.subagent, "worker");
+		assert.equal(prompt.inheritContext, true);
+		assert.match(buildPromptCommandDescription(prompt), /subagent:worker/);
+		assert.match(buildPromptCommandDescription(prompt), /fork/);
+	});
+});
+
+test("loadPromptsWithModel rejects invalid inheritContext combinations", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "chain-delegated.md"), '---\nchain: worker\nsubagent: true\n---\nignored');
+		writeFileSync(join(cwd, ".pi", "prompts", "inherit-only.md"), '---\nmodel: claude-sonnet-4-20250514\ninheritContext: true\n---\nbody');
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.get("chain-delegated")?.subagent, undefined);
+		assert.equal(result.prompts.get("inherit-only")?.inheritContext, undefined);
+		const diagnostics = result.diagnostics.map((item) => item.message).join("\n");
+		assert.match(diagnostics, /cannot be combined/i);
+		assert.match(diagnostics, /requires "subagent"/i);
+	});
+});
+
 test("resolveSkillPath searches project .pi, ancestor .agents, then global skills", () => {
 	withTempHome((root) => {
 		const repoRoot = join(root, "repo");

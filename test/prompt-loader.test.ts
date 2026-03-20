@@ -409,6 +409,106 @@ test("loadPromptsWithModel rejects invalid inheritContext combinations", () => {
 	});
 });
 
+test("loadPromptsWithModel stores cwd for delegated prompts", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "delegated-cwd.md"),
+			"---\nmodel: claude-sonnet-4-20250514\nsubagent: true\ncwd: /tmp/nfd\n---\nbody",
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("delegated-cwd");
+		assert.ok(prompt);
+		assert.equal(prompt.cwd, "/tmp/nfd");
+	});
+});
+
+test("loadPromptsWithModel ignores cwd without subagent or chain", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "cwd-no-subagent.md"),
+			"---\nmodel: claude-sonnet-4-20250514\ncwd: /tmp/nfd\n---\nbody",
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("cwd-no-subagent");
+		assert.ok(prompt);
+		assert.equal(prompt.cwd, undefined);
+		assert.match(result.diagnostics.map((item) => item.message).join("\n"), /frontmatter field "cwd" requires "subagent"/i);
+	});
+});
+
+test("loadPromptsWithModel rejects non-absolute cwd values", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "cwd-relative.md"),
+			"---\nmodel: claude-sonnet-4-20250514\nsubagent: true\ncwd: relative/path\n---\nbody",
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("cwd-relative");
+		assert.ok(prompt);
+		assert.equal(prompt.cwd, undefined);
+		assert.match(result.diagnostics.map((item) => item.message).join("\n"), /must be an absolute path/i);
+	});
+});
+
+test("loadPromptsWithModel rejects non-string cwd values", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "cwd-number.md"),
+			"---\nmodel: claude-sonnet-4-20250514\nsubagent: true\ncwd: 123\n---\nbody",
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("cwd-number");
+		assert.ok(prompt);
+		assert.equal(prompt.cwd, undefined);
+		assert.match(result.diagnostics.map((item) => item.message).join("\n"), /expected a string/i);
+	});
+});
+
+test("loadPromptsWithModel expands tilde-prefixed cwd values", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "cwd-tilde.md"),
+			"---\nmodel: claude-sonnet-4-20250514\nsubagent: true\ncwd: ~/project\n---\nbody",
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("cwd-tilde");
+		assert.ok(prompt);
+		assert.equal(prompt.cwd, join(root, "project"));
+	});
+});
+
+test("loadPromptsWithModel stores cwd on chain templates", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "chain-cwd.md"),
+			'---\nchain: "analyze -> fix"\ncwd: /tmp/nfd\n---\nignored',
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("chain-cwd");
+		assert.ok(prompt);
+		assert.equal(prompt.cwd, "/tmp/nfd");
+		assert.equal(buildPromptCommandDescription(prompt), "[chain: analyze -> fix cwd:/tmp/nfd] (project)");
+	});
+});
+
 test("resolveSkillPath searches project .pi, ancestor .agents, then global skills", () => {
 	withTempHome((root) => {
 		const repoRoot = join(root, "repo");

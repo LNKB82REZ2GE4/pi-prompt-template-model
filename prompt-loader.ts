@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
 import { parseFrontmatter } from "@mariozechner/pi-coding-agent";
 
@@ -45,6 +45,7 @@ export interface PromptWithModel {
 	converge?: boolean;
 	subagent?: true | string;
 	inheritContext?: boolean;
+	cwd?: string;
 	source: PromptSource;
 	subdir?: string;
 	filePath: string;
@@ -331,6 +332,47 @@ function normalizeSubagent(
 	return normalized;
 }
 
+export function expandCwdPath(raw: string): string | undefined {
+	const expanded = raw.startsWith("~/") ? join(homedir(), raw.slice(2)) : raw;
+	return isAbsolute(expanded) ? expanded : undefined;
+}
+
+function normalizeCwd(
+	value: unknown,
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): string | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string") {
+		diagnostics.push(
+			createDiagnostic(
+				"invalid-cwd",
+				filePath,
+				source,
+				`Ignoring invalid cwd in ${filePath}: expected a string.`,
+			),
+		);
+		return undefined;
+	}
+
+	const trimmed = value.trim();
+	if (!trimmed) return undefined;
+	const expanded = expandCwdPath(trimmed);
+	if (!expanded) {
+		diagnostics.push(
+			createDiagnostic(
+				"invalid-cwd",
+				filePath,
+				source,
+				`Ignoring cwd in ${filePath}: must be an absolute path.`,
+			),
+		);
+		return undefined;
+	}
+	return expanded;
+}
+
 function normalizeInheritContext(
 	value: unknown,
 	filePath: string,
@@ -500,6 +542,7 @@ function loadPromptsWithModelFromDir(
 				const { body } = parsed;
 				const chain = normalizeChain(frontmatter.chain, fullPath, source, diagnostics);
 				let subagent = normalizeSubagent(frontmatter.subagent, fullPath, source, diagnostics);
+				const cwd = normalizeCwd(frontmatter.cwd, fullPath, source, diagnostics);
 				const inheritContext = normalizeInheritContext(frontmatter.inheritContext, fullPath, source, diagnostics);
 				if (chain && subagent !== undefined) {
 					diagnostics.push(
@@ -522,6 +565,16 @@ function loadPromptsWithModelFromDir(
 						),
 					);
 				}
+				if (!chain && subagent === undefined && cwd) {
+					diagnostics.push(
+						createDiagnostic(
+							"invalid-cwd",
+							fullPath,
+							source,
+							`Ignoring cwd in ${fullPath}: frontmatter field "cwd" requires "subagent".`,
+						),
+					);
+				}
 				const hasModelField = Object.hasOwn(frontmatter, "model");
 				const parsedModels = chain ? [] : normalizeModelSpecs(frontmatter.model, fullPath, source, diagnostics);
 				if (!chain && hasModelField && !parsedModels) continue;
@@ -541,6 +594,7 @@ function loadPromptsWithModelFromDir(
 				}
 
 				const safeInheritContext = subagent !== undefined && inheritContext;
+				const safeCwd = (chain || subagent !== undefined) ? cwd : undefined;
 				const description = normalizeStringField("description", frontmatter.description, fullPath, source, diagnostics) ?? "";
 				const skill = chain ? undefined : normalizeStringField("skill", frontmatter.skill, fullPath, source, diagnostics);
 				const thinking = chain ? undefined : normalizeThinking(frontmatter.thinking, fullPath, source, diagnostics);
@@ -576,6 +630,7 @@ function loadPromptsWithModelFromDir(
 					converge: converge === false ? false : undefined,
 					subagent,
 					inheritContext: safeInheritContext || undefined,
+					cwd: safeCwd || undefined,
 					source,
 					subdir: subdir || undefined,
 					filePath: fullPath,
@@ -651,7 +706,8 @@ export function loadPromptsWithModel(cwd: string): LoadPromptsWithModelResult {
 export function buildPromptCommandDescription(prompt: PromptWithModel): string {
 	const sourceLabel = prompt.subdir ? `(${prompt.source}:${prompt.subdir})` : `(${prompt.source})`;
 	if (prompt.chain) {
-		const details = `[chain: ${prompt.chain}] ${sourceLabel}`;
+		const cwdLabel = prompt.cwd ? ` cwd:${prompt.cwd}` : "";
+		const details = `[chain: ${prompt.chain}${cwdLabel}] ${sourceLabel}`;
 		return prompt.description ? `${prompt.description} ${details}` : details;
 	}
 	const modelLabel = prompt.models.length > 0 ? prompt.models.map((model) => model.split("/").pop() || model).join("|") : "current";
@@ -659,8 +715,9 @@ export function buildPromptCommandDescription(prompt: PromptWithModel): string {
 	const thinkingLabel = prompt.thinking ? ` ${prompt.thinking}` : "";
 	const loopLabel = prompt.loop ? ` loop:${prompt.loop}` : "";
 	const subagentLabel = prompt.subagent ? ` subagent:${prompt.subagent === true ? "delegate" : prompt.subagent}` : "";
+	const cwdLabel = prompt.cwd ? ` cwd:${prompt.cwd}` : "";
 	const inheritContextLabel = prompt.inheritContext ? " fork" : "";
-	const details = `[${modelLabel}${thinkingLabel}${skillLabel}${loopLabel}${subagentLabel}${inheritContextLabel}] ${sourceLabel}`;
+	const details = `[${modelLabel}${thinkingLabel}${skillLabel}${loopLabel}${subagentLabel}${cwdLabel}${inheritContextLabel}] ${sourceLabel}`;
 	return prompt.description ? `${prompt.description} ${details}` : details;
 }
 

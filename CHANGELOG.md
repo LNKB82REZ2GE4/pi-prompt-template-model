@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-03-20
+
+### Added
+- Added delegated-subprocess working directory controls via `cwd` frontmatter (for `subagent` prompts and chain-template defaults) plus runtime `--cwd=<path>` overrides.
+
 ### Fixed
 - Rewrote README for clarity: fixed default subagent name (`delegate`, not `worker`), corrected provider priority to include `openai-codex`, merged broken frontmatter table into grouped sections with readable descriptions, cut redundant examples, and tightened prose throughout.
 

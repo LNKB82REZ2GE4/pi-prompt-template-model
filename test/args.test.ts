@@ -195,3 +195,28 @@ test("extractSubagentOverride ignores quoted flags and strips repeated overrides
 		override: { enabled: true, agent: "worker" },
 	});
 });
+
+test("extractSubagentOverride extracts --cwd and strips it from args", () => {
+	assert.deepEqual(extractSubagentOverride("--cwd=/tmp/nfd task"), {
+		args: "task",
+		cwd: "/tmp/nfd",
+	});
+	assert.deepEqual(extractSubagentOverride("task --subagent=reviewer --cwd=/tmp/nfd"), {
+		args: "task",
+		override: { enabled: true, agent: "reviewer" },
+		cwd: "/tmp/nfd",
+	});
+});
+
+test("extractSubagentOverride handles quoted, empty, and repeated --cwd flags", () => {
+	assert.deepEqual(extractSubagentOverride('"--cwd=/tmp" task'), {
+		args: '"--cwd=/tmp" task',
+	});
+	assert.deepEqual(extractSubagentOverride("task --cwd="), {
+		args: "task",
+	});
+	assert.deepEqual(extractSubagentOverride("task --cwd=/tmp/one --cwd=/tmp/two"), {
+		args: "task",
+		cwd: "/tmp/two",
+	});
+});

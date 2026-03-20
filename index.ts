@@ -6,7 +6,7 @@ import { parseChainSteps, parseChainDeclaration, type ChainStep } from "./chain-
 import { generateIterationSummary, didIterationMakeChanges, getIterationEntries } from "./loop-utils.js";
 import { notify, summarizePromptDiagnostics, diagnosticsFingerprint } from "./notifications.js";
 import { preparePromptExecution } from "./prompt-execution.js";
-import { buildPromptCommandDescription, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptWithModel } from "./prompt-loader.js";
+import { buildPromptCommandDescription, expandCwdPath, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptWithModel } from "./prompt-loader.js";
 import { renderSkillLoaded, type SkillLoadedDetails } from "./skill-loaded-renderer.js";
 import { createToolManager } from "./tool-manager.js";
 import { executeSubagentPromptStep } from "./subagent-step.js";
@@ -372,6 +372,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		converge: boolean,
 		ctx: ExtensionCommandContext,
 		subagentOverride?: SubagentOverride,
+		cwdOverride?: string,
 	) {
 		refreshPrompts(ctx.cwd, ctx);
 		const initialPrompt = prompts.get(name);
@@ -411,10 +412,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					notify(ctx, `Prompt "${name}" no longer exists`, "error");
 					break;
 				}
+				const effectivePrompt = cwdOverride ? { ...prompt, cwd: cwdOverride } : prompt;
 
 				const iterationStartId = ctx.sessionManager.getLeafId();
 				const stepResult = await executePromptStep(
-					prompt,
+					effectivePrompt,
 					parseCommandArgs(cleanedArgs),
 					ctx,
 					currentModel,
@@ -426,7 +428,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				currentThinking = pi.getThinkingLevel();
 				completedIterations++;
 
-				const iterationChanged = shouldDelegatePrompt(prompt, subagentOverride)
+				const iterationChanged = shouldDelegatePrompt(effectivePrompt, subagentOverride)
 					? stepResult.changed
 					: didIterationMakeChanges(getIterationEntries(ctx, iterationStartId));
 				if (useConverge && (isUnlimited || effectiveMax > 1) && !iterationChanged) {
@@ -483,6 +485,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		shouldRestore: boolean,
 		ctx: ExtensionCommandContext,
 		subagentOverride?: SubagentOverride,
+		cwdOverride?: string,
 	) {
 		const validateChainSteps = (): boolean => {
 			const missingTemplates = steps.filter((step) => !prompts.has(step.name));
@@ -538,6 +541,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 				const templates = steps.map((step) => ({
 					...prompts.get(step.name)!,
+					...(cwdOverride ? { cwd: cwdOverride } : {}),
 					stepArgs: step.args,
 					stepLoop: step.loopCount ?? 1,
 				}));
@@ -665,6 +669,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 
 		const subagent = extractSubagentOverride(args);
+		const runtimeCwd = subagent.cwd ? expandCwdPath(subagent.cwd) : undefined;
+		if (subagent.cwd && !runtimeCwd) {
+			notify(ctx, `Invalid --cwd path: must be absolute`, "error");
+			return;
+		}
 		const argsWithoutSubagent = subagent.args;
 
 		if (prompt.chain) {
@@ -696,6 +705,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			const cwdOverride = runtimeCwd ?? prompt.cwd;
 			await runSharedChainExecution(
 				steps,
 				parseCommandArgs(cleanedArgs),
@@ -705,26 +715,28 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				prompt.restore,
 				ctx,
 				subagent.override,
+				cwdOverride,
 			);
 			return;
 		}
 
 		const loop = extractLoopCount(argsWithoutSubagent);
 		if (loop) {
-			await runPromptLoop(name, loop.args, loop.loopCount, loop.fresh, loop.converge, ctx, subagent.override);
+			await runPromptLoop(name, loop.args, loop.loopCount, loop.fresh, loop.converge, ctx, subagent.override, runtimeCwd);
 			return;
 		}
 
 		if (prompt.loop !== undefined) {
 			const flags = extractLoopFlags(argsWithoutSubagent);
-			await runPromptLoop(name, flags.args, prompt.loop, flags.fresh, flags.converge, ctx, subagent.override);
+			await runPromptLoop(name, flags.args, prompt.loop, flags.fresh, flags.converge, ctx, subagent.override, runtimeCwd);
 			return;
 		}
 
+		const effectivePrompt = runtimeCwd ? { ...prompt, cwd: runtimeCwd } : prompt;
 		const savedModel = getCurrentModel(ctx);
 		const savedThinking = pi.getThinkingLevel();
 		const stepResult = await executePromptStep(
-			prompt,
+			effectivePrompt,
 			parseCommandArgs(argsWithoutSubagent),
 			ctx,
 			savedModel,
@@ -732,13 +744,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		);
 		if (stepResult === "aborted") return;
 
-		if (!shouldDelegatePrompt(prompt, subagent.override) && prompt.restore) {
+		if (!shouldDelegatePrompt(effectivePrompt, subagent.override) && prompt.restore) {
 			const currentModel = getCurrentModel(ctx);
 			if (savedModel && currentModel && !sameModel(savedModel, currentModel)) {
 				previousModel = savedModel;
 				previousThinking = savedThinking;
 			}
-			if (prompt.thinking && previousThinking === undefined && prompt.thinking !== savedThinking) {
+			if (effectivePrompt.thinking && previousThinking === undefined && effectivePrompt.thinking !== savedThinking) {
 				previousThinking = savedThinking;
 			}
 		}
@@ -840,6 +852,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		refreshPrompts(ctx.cwd, ctx);
 
 		const subagent = extractSubagentOverride(args);
+		const runtimeCwd = subagent.cwd ? expandCwdPath(subagent.cwd) : undefined;
+		if (subagent.cwd && !runtimeCwd) {
+			notify(ctx, `Invalid --cwd path: must be absolute`, "error");
+			return;
+		}
 		const loop = extractLoopCount(subagent.args);
 		const cleanedArgs = loop ? loop.args : subagent.args;
 
@@ -862,6 +879,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			true,
 			ctx,
 			subagent.override,
+			runtimeCwd,
 		);
 	}
 

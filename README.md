@@ -78,6 +78,7 @@ All fields are optional. Templates that don't use any extension features (no `mo
 |-------|---------|--------------|
 | `subagent` | — | Delegate execution to a subagent instead of running in the current session. `true` uses the default `delegate` agent; a string value like `reviewer` targets that specific agent. Requires [pi-subagents](https://github.com/nicobailon/pi-subagents/). |
 | `inheritContext` | `false` | Only meaningful with `subagent`. When `true`, the subagent receives a fork of the current conversation context instead of starting fresh. |
+| `cwd` | — | Working directory for delegated subagent subprocesses. Must be an absolute path (`~/...` is expanded). Valid with `subagent`, and also on chain templates as the default cwd for delegated steps. |
 
 ## Model Format
 
@@ -222,9 +223,22 @@ Audit this diff for correctness and edge cases: $@
 
 `inheritContext: true` forks the current conversation so the subagent has full context. Without it, the subagent starts fresh.
 
+To force a subagent into a specific working directory, add `cwd`:
+
+```markdown
+---
+model: claude-sonnet-4-20250514
+subagent: browser-screenshoter
+cwd: /tmp/screenshots
+---
+Use url in the prompt to take screenshot: $@
+```
+
+The subagent process runs with `/tmp/screenshots` as its working directory. Paths must be absolute (`~/...` is expanded). The directory is validated at execution time.
+
 During execution, a live progress widget appears above the editor showing elapsed time, tool count, token usage, and the current tool. When the run finishes, it's replaced by a completion card with the task preview, tool call history, output, and usage stats.
 
-You can override delegation at runtime per invocation with `--subagent`, `--subagent=<name>`, or `--subagent:<name>`. Runtime flags take precedence for that invocation only.
+You can override delegation at runtime per invocation with `--subagent`, `--subagent=<name>`, `--subagent:<name>`, or `--cwd=<path>`. `--cwd=<path>` must be absolute after optional `~/...` expansion. Runtime flags take precedence for that invocation only.
 
 ## Loop Execution
 
@@ -289,7 +303,7 @@ This registers the file's name as a command that runs `double-check` twice, then
 
 Steps with a `model` field use their own model. Steps without one inherit a snapshot of whatever model was active when the chain started — not the previous step's model. This keeps behavior deterministic regardless of what earlier steps do.
 
-Chain templates support `loop`, `fresh`, `converge`, and `restore` in their frontmatter for controlling the overall execution:
+Chain templates support `loop`, `fresh`, `converge`, `restore`, and `cwd` in their frontmatter for controlling the overall execution:
 
 ```markdown
 ---
@@ -301,6 +315,8 @@ converge: false
 ```
 
 This runs the full analyze → fix chain 3 times, with fresh context between iterations and no early stopping. Chain nesting is not supported — steps can't reference other chain templates.
+
+When a chain template sets `cwd`, it becomes the default delegated subprocess working directory for all delegated steps in that chain. Runtime `--cwd=<path>` overrides the chain template value.
 
 ### Looping chains from the CLI
 

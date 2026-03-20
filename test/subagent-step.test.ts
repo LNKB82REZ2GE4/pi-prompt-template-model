@@ -160,6 +160,36 @@ test("executeSubagentPromptStep returns delegated change info", async () => {
 	});
 });
 
+test("executeSubagentPromptStep forwards prompt cwd to delegated request", async () => {
+	await withRuntime(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		const delegatedCwd = join(root, "delegated-cwd");
+		mkdirSync(delegatedCwd, { recursive: true });
+		let requestCwd: string | undefined;
+
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const request = data as any;
+			requestCwd = request.cwd;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
+				isError: false,
+			});
+		});
+
+		await executeSubagentPromptStep({
+			pi,
+			prompt: { ...prompt, cwd: delegatedCwd },
+			args: [],
+			ctx,
+			currentModel: ctx.model,
+		});
+		assert.equal(requestCwd, delegatedCwd);
+	});
+});
+
 test("executeSubagentPromptStep fails on delegated error response", async () => {
 	await withRuntime(async (root) => {
 		const pi = createPi();

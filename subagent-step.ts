@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { AssistantMessage, Message } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ModelRegistry } from "@mariozechner/pi-coding-agent";
@@ -254,6 +255,10 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 		throw new Error(prepared.message);
 	}
 	if (prepared.warning) notify(ctx, prepared.warning, "warning");
+	const effectiveCwd = prompt.cwd ?? ctx.cwd;
+	if (effectiveCwd !== ctx.cwd && !existsSync(effectiveCwd)) {
+		throw new Error(`cwd directory does not exist: ${effectiveCwd}`);
+	}
 
 	const request: DelegatedSubagentRequest = {
 		requestId: randomUUID(),
@@ -261,7 +266,7 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 		task: prepared.content,
 		context: prompt.inheritContext ? "fork" : "fresh",
 		model: `${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`,
-		cwd: ctx.cwd,
+		cwd: effectiveCwd,
 	};
 
 	if (ctx.hasUI) {
@@ -319,5 +324,4 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 		}
 	}
 }
-
 

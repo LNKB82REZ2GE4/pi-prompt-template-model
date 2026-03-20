@@ -19,6 +19,7 @@ export interface SubagentOverride {
 export interface SubagentOverrideExtraction {
 	args: string;
 	override?: SubagentOverride;
+	cwd?: string;
 }
 
 export function extractLoopCount(argsString: string): LoopExtraction | null {
@@ -164,6 +165,7 @@ export function extractLoopFlags(argsString: string): LoopFlags {
 
 export function extractSubagentOverride(argsString: string): SubagentOverrideExtraction {
 	let override: SubagentOverride | undefined;
+	let cwdRaw: string | undefined;
 	const tokensToRemove: Array<{ start: number; end: number }> = [];
 
 	let i = 0;
@@ -197,10 +199,17 @@ export function extractSubagentOverride(argsString: string): SubagentOverrideExt
 			tokensToRemove.push({ start: tokenStart, end: i });
 			const value = token.includes("=") ? token.slice("--subagent=".length) : token.slice("--subagent:".length);
 			override = value ? { enabled: true, agent: value } : { enabled: true };
+			continue;
+		}
+
+		if (token.startsWith("--cwd=")) {
+			tokensToRemove.push({ start: tokenStart, end: i });
+			const value = token.slice("--cwd=".length);
+			cwdRaw = value || undefined;
 		}
 	}
 
-	if (!override) return { args: argsString.trim() };
+	if (tokensToRemove.length === 0) return { args: argsString.trim() };
 
 	tokensToRemove.sort((a, b) => b.start - a.start);
 	let cleaned = argsString;
@@ -210,7 +219,8 @@ export function extractSubagentOverride(argsString: string): SubagentOverrideExt
 
 	return {
 		args: cleaned.trim(),
-		override,
+		...(override ? { override } : {}),
+		...(cwdRaw !== undefined ? { cwd: cwdRaw } : {}),
 	};
 }
 

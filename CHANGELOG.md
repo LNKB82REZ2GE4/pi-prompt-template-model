@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Rewrote README for clarity: fixed default subagent name (`delegate`, not `worker`), corrected provider priority to include `openai-codex`, merged broken frontmatter table into grouped sections with readable descriptions, cut redundant examples, and tightened prose throughout.
+
 ## [0.6.1] - 2026-03-20
 
 ### Added

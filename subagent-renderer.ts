@@ -23,6 +23,12 @@ interface DelegatedDetails {
 	context?: "fresh" | "fork";
 	model?: string;
 	messages?: SessionMessage[];
+	parallelResults?: Array<{
+		agent?: string;
+		messages?: SessionMessage[];
+		isError?: boolean;
+		errorText?: string;
+	}>;
 }
 
 const DEFAULT_AGENT = "delegate";
@@ -73,6 +79,16 @@ function extractToolCalls(messages: SessionMessage[]): string[] {
 	return calls;
 }
 
+function extractAssistantText(messages: SessionMessage[]): string {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if (msg.role !== "assistant") continue;
+		const text = extractTextContent(msg.content);
+		if (text.trim()) return text;
+	}
+	return "";
+}
+
 function extractUsage(messages: SessionMessage[]): { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; model?: string; turns: number } {
 	let input = 0, output = 0, cacheRead = 0, cacheWrite = 0, cost = 0, turns = 0;
 	let model: string | undefined;
@@ -102,9 +118,13 @@ export function renderDelegatedSubagentResult(
 	theme: Theme,
 ) {
 	const details = message.details;
-	const agent = details?.agent ?? DEFAULT_AGENT;
+	const parallelResults = details?.parallelResults ?? [];
+	const hasParallelResults = parallelResults.length > 0;
+	const agent = hasParallelResults ? "parallel" : (details?.agent ?? DEFAULT_AGENT);
 	const context = details?.context === "fork" ? theme.fg("warning", " [fork]") : "";
-	const messages = (details?.messages ?? []) as SessionMessage[];
+	const messages = hasParallelResults
+		? parallelResults.flatMap((result) => (result.messages ?? []) as SessionMessage[])
+		: ((details?.messages ?? []) as SessionMessage[]);
 	const text = extractTextContent(message.content);
 
 	const usage = extractUsage(messages);
@@ -118,7 +138,9 @@ export function renderDelegatedSubagentResult(
 
 	// Header: ok worker [fork] | 3 tools, 496 tok
 	const icon = theme.fg("success", "ok");
-	const stats = `${toolCount} tool${toolCount === 1 ? "" : "s"}, ${tokensLabel}`;
+	const stats = hasParallelResults
+		? `${parallelResults.length} task${parallelResults.length === 1 ? "" : "s"}, ${toolCount} tool${toolCount === 1 ? "" : "s"}, ${tokensLabel}`
+		: `${toolCount} tool${toolCount === 1 ? "" : "s"}, ${tokensLabel}`;
 	box.addChild(new Text(`${icon} ${theme.fg("toolTitle", theme.bold(agent))}${context} | ${stats}`, 0, 0));
 	box.addChild(new Spacer(1));
 
@@ -129,28 +151,59 @@ export function renderDelegatedSubagentResult(
 		box.addChild(new Spacer(1));
 	}
 
-	// Tool calls
-	if (toolCalls.length > 0) {
-		const showCalls = options.expanded ? toolCalls : toolCalls.slice(0, 5);
-		for (const call of showCalls) {
-			box.addChild(new Text(theme.fg("dim", call), 0, 0));
-		}
-		if (!options.expanded && toolCalls.length > 5) {
-			box.addChild(new Text(theme.fg("warning", `... (${toolCalls.length - 5} more tool calls)`), 0, 0));
-		}
-		box.addChild(new Spacer(1));
-	}
+	if (hasParallelResults) {
+		for (let index = 0; index < parallelResults.length; index++) {
+			const result = parallelResults[index]!;
+			const taskLabel = result.agent || `task-${index + 1}`;
+			box.addChild(new Text(theme.fg("toolTitle", `=== Task ${index + 1}: ${taskLabel} ===`), 0, 0));
+			const taskMessages = (result.messages ?? []) as SessionMessage[];
+			const taskText = extractAssistantText(taskMessages);
+			if (result.isError) {
+				const errorText = result.errorText || "Task failed.";
+				box.addChild(new Text(theme.fg("error", errorText), 0, 0));
+				box.addChild(new Spacer(1));
+				continue;
+			}
 
-	// Output text
-	if (text) {
-		const lines = text.split("\n");
-		if (options.expanded || lines.length <= PREVIEW_LINES) {
-			box.addChild(new Text(theme.fg("toolOutput", text), 0, 0));
-		} else {
-			box.addChild(new Text(theme.fg("toolOutput", lines.slice(0, PREVIEW_LINES).join("\n")), 0, 0));
-			box.addChild(new Text(theme.fg("warning", `\n... (${lines.length - PREVIEW_LINES} more lines — Ctrl+O to expand)`), 0, 0));
+			if (!taskText) {
+				box.addChild(new Text(theme.fg("dim", "(no assistant text)"), 0, 0));
+				box.addChild(new Spacer(1));
+				continue;
+			}
+
+			const lines = taskText.split("\n");
+			if (options.expanded || lines.length <= PREVIEW_LINES) {
+				box.addChild(new Text(theme.fg("toolOutput", taskText), 0, 0));
+			} else {
+				box.addChild(new Text(theme.fg("toolOutput", lines.slice(0, PREVIEW_LINES).join("\n")), 0, 0));
+				box.addChild(new Text(theme.fg("warning", `\n... (${lines.length - PREVIEW_LINES} more lines — Ctrl+O to expand)`), 0, 0));
+			}
+			box.addChild(new Spacer(1));
 		}
-		box.addChild(new Spacer(1));
+	} else {
+		// Tool calls
+		if (toolCalls.length > 0) {
+			const showCalls = options.expanded ? toolCalls : toolCalls.slice(0, 5);
+			for (const call of showCalls) {
+				box.addChild(new Text(theme.fg("dim", call), 0, 0));
+			}
+			if (!options.expanded && toolCalls.length > 5) {
+				box.addChild(new Text(theme.fg("warning", `... (${toolCalls.length - 5} more tool calls)`), 0, 0));
+			}
+			box.addChild(new Spacer(1));
+		}
+
+		// Output text
+		if (text) {
+			const lines = text.split("\n");
+			if (options.expanded || lines.length <= PREVIEW_LINES) {
+				box.addChild(new Text(theme.fg("toolOutput", text), 0, 0));
+			} else {
+				box.addChild(new Text(theme.fg("toolOutput", lines.slice(0, PREVIEW_LINES).join("\n")), 0, 0));
+				box.addChild(new Text(theme.fg("warning", `\n... (${lines.length - PREVIEW_LINES} more lines — Ctrl+O to expand)`), 0, 0));
+			}
+			box.addChild(new Spacer(1));
+		}
 	}
 
 	// Stats footer

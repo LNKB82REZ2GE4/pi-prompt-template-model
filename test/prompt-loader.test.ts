@@ -358,6 +358,32 @@ test("loadPromptsWithModel diagnoses invalid chain frontmatter values", () => {
 	});
 });
 
+test("loadPromptsWithModel rejects invalid parallel() chain declarations in frontmatter", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "parallel-empty.md"), '---\nchain: "parallel() -> review"\n---\nignored');
+		writeFileSync(join(cwd, ".pi", "prompts", "parallel-nested.md"), '---\nchain: "parallel(scan, parallel(review))"\n---\nignored');
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.has("parallel-empty"), false);
+		assert.equal(result.prompts.has("parallel-nested"), false);
+		const diagnostics = result.diagnostics.map((item) => item.message).join("\n");
+		assert.match(diagnostics, /invalid chain declaration segment/i);
+	});
+});
+
+test("loadPromptsWithModel accepts single-item parallel() declarations", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "parallel-single.md"), '---\nchain: "parallel(scan-fe)"\n---\nignored');
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.get("parallel-single")?.chain, "parallel(scan-fe)");
+	});
+});
+
 test("buildPromptCommandDescription includes loop metadata", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");

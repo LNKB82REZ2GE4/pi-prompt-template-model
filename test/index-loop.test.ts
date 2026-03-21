@@ -427,6 +427,27 @@ test("chain templates honor per-step --loop counts", async () => {
 	});
 });
 
+test("parallel chain steps reject per-task --loop values", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(scan-fe --loop 2)"\n---\nignored');
+		writeFileSync(join(cwd, ".pi", "prompts", "scan-fe.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nscan`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+
+		const pipeline = pi.commands.get("pipeline");
+		assert.ok(pipeline);
+		await pipeline.handler("", ctx);
+
+		assert.equal(pi.userMessages.length, 0);
+		assert.match(getNotifications().join("\n"), /does not support per-task --loop/i);
+	});
+});
+
 test("chain templates treat quoted --loop step args as literals", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");

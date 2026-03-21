@@ -12,6 +12,7 @@ import {
 	appendDelegatedLiveOutput,
 	clearDelegatedLiveState,
 	ensureSubagentRuntime,
+	getDelegatedLiveState,
 	PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE,
 	PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT,
@@ -20,23 +21,43 @@ import {
 	PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT,
 	resolveDelegatedAgent,
 	updateDelegatedLiveState,
+	type DelegatedSubagentParallelResult,
 	type DelegatedSubagentRequest,
 	type DelegatedSubagentResponse,
+	type DelegatedSubagentTask,
+	type DelegatedSubagentTaskProgress,
 	type DelegatedSubagentUpdate,
 } from "./subagent-runtime.js";
 import type { SubagentOverride } from "./args.js";
 import { createDelegatedProgressWidget, DELEGATED_WIDGET_KEY } from "./subagent-widget.js";
 
-interface DelegatedPromptOptions {
+interface DelegatedPromptBaseOptions {
 	pi: ExtensionAPI;
-	prompt: PromptWithModel;
-	args: string[];
 	ctx: ExtensionContext;
 	currentModel: Model<any> | undefined;
 	override?: SubagentOverride;
 	signal?: AbortSignal;
 	inheritedModel?: Model<any>;
 }
+
+interface DelegatedSinglePromptOptions extends DelegatedPromptBaseOptions {
+	prompt: PromptWithModel;
+	args: string[];
+	parallel?: never;
+}
+
+interface DelegatedParallelTaskInput {
+	prompt: PromptWithModel;
+	args: string[];
+}
+
+interface DelegatedParallelPromptOptions extends DelegatedPromptBaseOptions {
+	parallel: DelegatedParallelTaskInput[];
+	prompt?: never;
+	args?: never;
+}
+
+type DelegatedPromptOptions = DelegatedSinglePromptOptions | DelegatedParallelPromptOptions;
 
 export interface DelegatedPromptOutcome {
 	changed: boolean;
@@ -81,6 +102,36 @@ function coerceMessages(messages: unknown[]): Message[] {
 	return messages as Message[];
 }
 
+function coerceParallelResults(parallelResults: DelegatedSubagentParallelResult[] | undefined): Array<{
+	agent: string;
+	messages: Message[];
+	isError: boolean;
+	errorText?: string;
+}> {
+	if (!Array.isArray(parallelResults)) return [];
+	return parallelResults.map((result) => ({
+		agent: result.agent,
+		messages: coerceMessages(result.messages),
+		isError: result.isError === true,
+		errorText: result.errorText,
+	}));
+}
+
+function renderParallelDelegatedText(
+	results: Array<{
+		agent: string;
+		messages: Message[];
+	}>,
+): string {
+	return results
+		.map((result, index) => {
+			const text = extractDelegatedText(result.messages);
+			const body = text || "(no assistant text)";
+			return `=== Task ${index + 1}: ${result.agent} ===\n${body}`;
+		})
+		.join("\n\n");
+}
+
 function resolveDelegationName(prompt: PromptWithModel, override?: SubagentOverride): string | undefined {
 	if (override) {
 		return override.agent || (typeof prompt.subagent === "string" ? prompt.subagent : DEFAULT_SUBAGENT_NAME);
@@ -88,6 +139,59 @@ function resolveDelegationName(prompt: PromptWithModel, override?: SubagentOverr
 	if (prompt.subagent === true) return DEFAULT_SUBAGENT_NAME;
 	if (typeof prompt.subagent === "string") return prompt.subagent;
 	return undefined;
+}
+
+interface PreparedDelegatedTask {
+	promptName: string;
+	agent: string;
+	task: string;
+	context: "fresh" | "fork";
+	model: string;
+	cwd: string;
+}
+
+async function prepareDelegatedTask(
+	task: DelegatedParallelTaskInput,
+	ctx: ExtensionContext,
+	currentModel: Model<any> | undefined,
+	override: SubagentOverride | undefined,
+	inheritedModel: Model<any> | undefined,
+	runtime: Awaited<ReturnType<typeof ensureSubagentRuntime>>,
+): Promise<PreparedDelegatedTask> {
+	const requestedAgent = resolveDelegationName(task.prompt, override);
+	if (!requestedAgent) {
+		throw new Error(`Prompt \`${task.prompt.name}\` is not configured for delegated execution.`);
+	}
+	const agent = resolveDelegatedAgent(runtime, ctx.cwd, requestedAgent);
+	const preparationOptions = inheritedModel === undefined ? undefined : { inheritedModel };
+	const prepared = await preparePromptExecution(
+		task.prompt,
+		task.args,
+		currentModel,
+		ctx.modelRegistry as Pick<ModelRegistry, "find" | "getAll" | "getAvailable" | "getApiKey" | "isUsingOAuth">,
+		preparationOptions,
+	);
+	if (!prepared) {
+		throw new Error(`No available model from: ${task.prompt.models.join(", ")}`);
+	}
+	if ("message" in prepared) {
+		if (prepared.warning) notify(ctx, prepared.warning, "warning");
+		throw new Error(prepared.message);
+	}
+	if (prepared.warning) notify(ctx, prepared.warning, "warning");
+	const effectiveCwd = task.prompt.cwd ?? ctx.cwd;
+	if (effectiveCwd !== ctx.cwd && !existsSync(effectiveCwd)) {
+		throw new Error(`cwd directory does not exist: ${effectiveCwd}`);
+	}
+
+	return {
+		promptName: task.prompt.name,
+		agent,
+		task: prepared.content,
+		context: task.prompt.inheritContext ? "fork" : "fresh",
+		model: `${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`,
+		cwd: effectiveCwd,
+	};
 }
 
 function formatProgressStatus(update: DelegatedSubagentUpdate): string | undefined {
@@ -100,6 +204,62 @@ function formatProgressStatus(update: DelegatedSubagentUpdate): string | undefin
 	return undefined;
 }
 
+function formatParallelProgressStatus(update: DelegatedSubagentUpdate): string | undefined {
+	if (!update.taskProgress || update.taskProgress.length === 0) return undefined;
+	const completed = update.taskProgress.filter((task) => task.status === "completed").length;
+	return `parallel ${completed}/${update.taskProgress.length} running`;
+}
+
+function mergeTaskProgress(
+	requestTasks: DelegatedSubagentTask[] | undefined,
+	existingProgress: DelegatedSubagentTaskProgress[] | undefined,
+	incomingProgress: DelegatedSubagentTaskProgress[] | undefined,
+): DelegatedSubagentTaskProgress[] | undefined {
+	if (!requestTasks || requestTasks.length === 0) return incomingProgress;
+
+	const merged = requestTasks.map((task, index) => {
+		const existing =
+			existingProgress?.find((entry) => entry.index === index) ??
+			existingProgress?.[index] ??
+			existingProgress?.find((entry) => entry.agent === task.agent);
+		return {
+			index,
+			agent: task.agent,
+			status: existing?.status ?? "pending",
+			currentTool: existing?.currentTool,
+			currentToolArgs: existing?.currentToolArgs,
+			recentOutput: existing?.recentOutput,
+			toolCount: existing?.toolCount,
+			durationMs: existing?.durationMs,
+			tokens: existing?.tokens,
+		};
+	});
+
+	if (!incomingProgress || incomingProgress.length === 0) return merged;
+
+	const consumed = new Set<number>();
+	for (const entry of incomingProgress) {
+		let targetIndex =
+			typeof entry.index === "number" && entry.index >= 0 && entry.index < merged.length
+				? entry.index
+				: -1;
+
+		if (targetIndex < 0) {
+			targetIndex = merged.findIndex((task, index) => task.agent === entry.agent && !consumed.has(index));
+		}
+		if (targetIndex < 0) continue;
+		consumed.add(targetIndex);
+		merged[targetIndex] = {
+			...merged[targetIndex],
+			...entry,
+			index: targetIndex,
+			agent: merged[targetIndex]!.agent,
+		};
+	}
+
+	return merged;
+}
+
 async function requestDelegatedRun(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
@@ -107,12 +267,13 @@ async function requestDelegatedRun(
 	signal?: AbortSignal,
 ): Promise<DelegatedSubagentResponse> {
 	return await new Promise((resolve, reject) => {
+		const requestLabel = request.tasks && request.tasks.length > 0 ? `parallel(${request.tasks.length})` : request.agent;
 		let done = false;
 		let started = false;
 		const startTimeoutMs = Number(process.env.PI_PROMPT_SUBAGENT_START_TIMEOUT_MS ?? "15000");
 		const effectiveTimeout = Number.isFinite(startTimeoutMs) && startTimeoutMs > 0 ? startTimeoutMs : 15_000;
 		const startTimeout = setTimeout(() => {
-			finish(() => reject(new Error(`Prompt \`${request.task}\` delegated subagent \`${request.agent}\` did not start within ${Math.round(effectiveTimeout / 1000)}s.`)));
+			finish(() => reject(new Error(`Delegated subagent \`${requestLabel}\` did not start within ${Math.round(effectiveTimeout / 1000)}s. Check that the subagent extension is loaded.`)));
 		}, effectiveTimeout);
 
 		const onStarted = (data: unknown) => {
@@ -121,7 +282,12 @@ async function requestDelegatedRun(
 			if (requestId !== request.requestId) return;
 			started = true;
 			clearTimeout(startTimeout);
-			updateDelegatedLiveState(request.requestId, { status: "running...", toolCount: 0, recentOutput: [] });
+			updateDelegatedLiveState(request.requestId, {
+				status: "running...",
+				toolCount: 0,
+				recentOutput: [],
+				taskProgress: request.tasks?.map((task, index) => ({ index, agent: task.agent, status: "pending" })) ?? [],
+			});
 			showWidget();
 		};
 
@@ -132,6 +298,11 @@ async function requestDelegatedRun(
 			clearTimeout(startTimeout);
 			updateDelegatedLiveState(request.requestId, {
 				status: payload.isError ? "failed" : "completed",
+				taskProgress: payload.parallelResults?.map((result, index) => ({
+					index,
+					agent: result.agent,
+					status: result.isError ? "failed" : "completed",
+				})),
 			});
 			clearWidget();
 			finish(() => resolve(payload as DelegatedSubagentResponse));
@@ -145,7 +316,7 @@ async function requestDelegatedRun(
 			widgetSet = true;
 			ctx.ui.setWidget(
 				DELEGATED_WIDGET_KEY,
-				(_tui, theme) => createDelegatedProgressWidget(request.requestId, request.agent, request.context, request.task, theme),
+				(_tui, theme) => createDelegatedProgressWidget(request.requestId, request.agent, request.context, request.task, request.tasks, theme),
 				{ placement: "aboveEditor" },
 			);
 		};
@@ -161,7 +332,18 @@ async function requestDelegatedRun(
 			if (done || !data || typeof data !== "object") return;
 			const update = data as DelegatedSubagentUpdate;
 			if (update.requestId !== request.requestId) return;
-			const progressStatus = formatProgressStatus(update);
+			const mergedTaskProgress = mergeTaskProgress(
+				request.tasks,
+				getDelegatedLiveState(request.requestId)?.taskProgress,
+				update.taskProgress,
+			);
+			const isParallel = (request.tasks?.length ?? 0) > 0;
+			const progressStatus = isParallel
+				? formatParallelProgressStatus({
+					...update,
+					taskProgress: mergedTaskProgress,
+				}) ?? formatProgressStatus(update)
+				: formatProgressStatus(update);
 			if (progressStatus) {
 				lastProgressStatus = progressStatus;
 			}
@@ -172,11 +354,17 @@ async function requestDelegatedRun(
 				toolCount: update.toolCount,
 				durationMs: update.durationMs,
 				tokens: update.tokens,
+				taskProgress: mergedTaskProgress,
 			});
 			appendDelegatedLiveOutput(request.requestId, update.recentOutput);
+			if (mergedTaskProgress) {
+				for (const task of mergedTaskProgress) {
+					appendDelegatedLiveOutput(request.requestId, task.recentOutput);
+				}
+			}
 			if (!ctx.hasUI) return;
 			const statusLine = progressStatus ?? (lastProgressStatus || "running...");
-			ctx.ui.setStatus("prompt-subagent", `delegating to ${request.agent} · ${statusLine}`);
+			ctx.ui.setStatus("prompt-subagent", `delegating to ${requestLabel} · ${statusLine}`);
 		};
 
 		const onTerminalInput = ctx.hasUI
@@ -226,67 +414,129 @@ async function requestDelegatedRun(
 
 		pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, request);
 
-		if (!started && ctx.hasUI) {
-			ctx.ui.setStatus("prompt-subagent", `delegating to ${request.agent}...`);
+		// The bridge emits STARTED_EVENT synchronously during the REQUEST_EVENT
+		// emit (all sync before the first await in the async handler chain).
+		// If started is still false, no bridge received the request.
+		if (!started && done) return; // already finished (e.g. response came synchronously)
+		if (!started) {
+			finish(() => reject(new Error(
+				`No subagent runtime responded for \`${requestLabel}\`. ` +
+				`Ensure the subagent extension is loaded and has no name conflicts with other extensions.`,
+			)));
+			return;
 		}
 	});
 }
 
 export async function executeSubagentPromptStep(options: DelegatedPromptOptions): Promise<DelegatedPromptOutcome | undefined> {
-	const { pi, prompt, args, ctx, currentModel, override, signal, inheritedModel } = options;
-	const requestedAgent = resolveDelegationName(prompt, override);
-	if (!requestedAgent) return undefined;
-
+	const { pi, ctx, currentModel, override, signal, inheritedModel } = options;
 	const runtime = await ensureSubagentRuntime(ctx.cwd);
-	const agent = resolveDelegatedAgent(runtime, ctx.cwd, requestedAgent);
-	const preparationOptions = inheritedModel === undefined ? undefined : { inheritedModel };
-	const prepared = await preparePromptExecution(
-		prompt,
-		args,
-		currentModel,
-		ctx.modelRegistry as Pick<ModelRegistry, "find" | "getAll" | "getAvailable" | "getApiKey" | "isUsingOAuth">,
-		preparationOptions,
-	);
-	if (!prepared) {
-		throw new Error(`No available model from: ${prompt.models.join(", ")}`);
+	const isParallelRequest = "parallel" in options;
+
+	const tasks = isParallelRequest
+		? options.parallel
+		: [{ prompt: options.prompt, args: options.args }];
+	if (tasks.length === 0) return undefined;
+
+	const preparedTasks: PreparedDelegatedTask[] = [];
+	for (const task of tasks) {
+		const preparedTask = await prepareDelegatedTask(task, ctx, currentModel, override, inheritedModel, runtime);
+		preparedTasks.push(preparedTask);
 	}
-	if ("message" in prepared) {
-		if (prepared.warning) notify(ctx, prepared.warning, "warning");
-		throw new Error(prepared.message);
-	}
-	if (prepared.warning) notify(ctx, prepared.warning, "warning");
-	const effectiveCwd = prompt.cwd ?? ctx.cwd;
-	if (effectiveCwd !== ctx.cwd && !existsSync(effectiveCwd)) {
-		throw new Error(`cwd directory does not exist: ${effectiveCwd}`);
+
+	const requestContext = preparedTasks[0]!.context;
+	const requestCwd = preparedTasks[0]!.cwd;
+	for (const preparedTask of preparedTasks) {
+		if (preparedTask.context !== requestContext) {
+			throw new Error("Parallel delegated prompts must share the same inheritContext setting.");
+		}
+		if (preparedTask.cwd !== requestCwd) {
+			throw new Error("Parallel delegated prompts must share the same cwd setting.");
+		}
 	}
 
 	const request: DelegatedSubagentRequest = {
 		requestId: randomUUID(),
-		agent,
-		task: prepared.content,
-		context: prompt.inheritContext ? "fork" : "fresh",
-		model: `${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`,
-		cwd: effectiveCwd,
+		agent: preparedTasks[0]!.agent,
+		task: preparedTasks[0]!.task,
+		...(isParallelRequest
+			? {
+				tasks: preparedTasks.map<DelegatedSubagentTask>((task) => ({
+					agent: task.agent,
+					task: task.task,
+					model: task.model,
+				})),
+			}
+			: {}),
+		context: requestContext,
+		model: preparedTasks[0]!.model,
+		cwd: requestCwd,
 	};
 
+	const promptLabel = preparedTasks.map((task) => task.promptName).join(", ");
+	const statusLabel = isParallelRequest ? `parallel(${preparedTasks.length})` : preparedTasks[0]!.agent;
 	if (ctx.hasUI) {
-		ctx.ui.setStatus("prompt-subagent", `delegating to ${agent}`);
-		ctx.ui.setWorkingMessage(`Running delegated prompt with ${agent}...`);
+		ctx.ui.setStatus("prompt-subagent", `delegating to ${statusLabel}`);
+		ctx.ui.setWorkingMessage(isParallelRequest ? `Running delegated parallel prompts with ${statusLabel}...` : `Running delegated prompt with ${statusLabel}...`);
 	}
-	notify(ctx, `Delegating prompt \`${prompt.name}\` to subagent \`${agent}\``, "info");
+	notify(
+		ctx,
+		isParallelRequest
+			? `Delegating parallel prompts (${promptLabel})`
+			: `Delegating prompt \`${preparedTasks[0]!.promptName}\` to subagent \`${preparedTasks[0]!.agent}\``,
+		"info",
+	);
 
 	try {
 		const response = await requestDelegatedRun(pi, ctx, request, signal);
 		if (response.isError) {
 			throw new Error(
-				`Prompt \`${prompt.name}\` delegated subagent \`${agent}\` failed: ${response.errorText || "unknown delegated error"}`,
+				`Delegated prompt execution failed: ${response.errorText || "unknown delegated error"}`,
 			);
+		}
+
+		if (isParallelRequest) {
+			const parallelResults = coerceParallelResults(response.parallelResults);
+			if (parallelResults.length === 0) {
+				throw new Error("Delegated parallel execution returned no results.");
+			}
+			const failures = parallelResults.filter((result) => result.isError);
+			if (failures.length > 0) {
+				const failureText = failures
+					.map((failure) => `${failure.agent}: ${failure.errorText || "unknown delegated error"}`)
+					.join("; ");
+				throw new Error(`Delegated parallel execution failed: ${failureText}`);
+			}
+
+			const text = renderParallelDelegatedText(parallelResults);
+			pi.sendMessage({
+				customType: PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE,
+				content: text,
+				display: true,
+				details: {
+					requestId: response.requestId,
+					agent: request.agent,
+					task: preparedTasks.map((task) => task.task).join("\n\n"),
+					context: response.context,
+					model: response.model,
+					messages: [],
+					parallelResults,
+					isError: false,
+					errorText: response.errorText,
+				},
+			});
+
+			return {
+				changed: parallelResults.some((result) => delegatedMessagesChanged(result.messages)),
+				text,
+				agent: request.agent,
+			};
 		}
 
 		const messages = coerceMessages(response.messages);
 		const text = extractDelegatedText(messages);
 		if (!text) {
-			throw new Error(`Prompt \`${prompt.name}\` delegated subagent \`${agent}\` returned no assistant text.`);
+			throw new Error("Delegated subagent returned no assistant text.");
 		}
 
 		pi.sendMessage({
@@ -295,7 +545,7 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 			display: true,
 			details: {
 				requestId: response.requestId,
-				agent,
+				agent: preparedTasks[0]!.agent,
 				task: request.task,
 				context: response.context,
 				model: response.model,
@@ -308,14 +558,14 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 		return {
 			changed: delegatedMessagesChanged(messages),
 			text,
-			agent,
+			agent: preparedTasks[0]!.agent,
 		};
 	} catch (error) {
-		if (error instanceof Error && error.message.startsWith(`Prompt \`${prompt.name}\` delegated subagent \`${agent}\` failed:`)) {
-			throw error;
-		}
 		const responseText = error instanceof Error ? error.message : String(error);
-		throw new Error(`Prompt \`${prompt.name}\` delegated subagent \`${agent}\` failed: ${responseText}`);
+		if (isParallelRequest) {
+			throw new Error(`Parallel delegated prompts (${promptLabel}) failed: ${responseText}`);
+		}
+		throw new Error(`Prompt \`${preparedTasks[0]!.promptName}\` delegated subagent \`${preparedTasks[0]!.agent}\` failed: ${responseText}`);
 	} finally {
 		clearDelegatedLiveState(request.requestId);
 		if (ctx.hasUI) {
@@ -324,4 +574,3 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 		}
 	}
 }
-

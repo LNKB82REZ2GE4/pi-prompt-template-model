@@ -301,6 +301,16 @@ chain: double-check --loop 2 -> deslop --loop 2
 
 This registers the file's name as a command that runs `double-check` twice, then `deslop` twice. Per-step `--loop N` repeats that step before moving to the next, with per-step convergence (stops early if no changes, unless the step's template has `converge: false`).
 
+Chain declarations also support parallel groups with `parallel(...)`:
+
+```markdown
+---
+chain: parallel(scan-frontend, scan-backend) -> consolidate
+---
+```
+
+Each entry inside `parallel(...)` runs as a delegated subagent task concurrently. Parallel entries can include per-step args (for example `parallel(scan-frontend, scan-backend "auth")`), but per-step `--loop` is not supported inside parallel groups. Nested `parallel(...)` is rejected. Parallel entries must be delegated templates (`subagent: ...` or runtime `--subagent` override), and all entries in the same parallel group must resolve to the same `inheritContext` mode and `cwd`.
+
 Steps with a `model` field use their own model. Steps without one inherit a snapshot of whatever model was active when the chain started — not the previous step's model. This keeps behavior deterministic regardless of what earlier steps do.
 
 Chain templates support `loop`, `fresh`, `converge`, `restore`, and `cwd` in their frontmatter for controlling the overall execution:
@@ -318,7 +328,15 @@ This runs the full analyze → fix chain 3 times, with fresh context between ite
 
 When a chain template sets `cwd`, it becomes the default delegated subprocess working directory for all delegated steps in that chain. Runtime `--cwd=<path>` overrides the chain template value.
 
-### Looping chains from the CLI
+### Parallel and looping from the CLI
+
+Parallel groups work in `/chain-prompts` too:
+
+```
+/chain-prompts parallel(scan-fe, scan-be) -> review
+```
+
+Looping applies to the entire chain:
 
 ```
 /chain-prompts analyze -> fix --loop 3

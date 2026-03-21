@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
 import { parseFrontmatter } from "@mariozechner/pi-coding-agent";
+import { parseChainDeclaration } from "./chain-parser.js";
 
 const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 export const RESERVED_COMMAND_NAMES = new Set([
@@ -541,6 +542,20 @@ function loadPromptsWithModelFromDir(
 				if (!frontmatter) continue;
 				const { body } = parsed;
 				const chain = normalizeChain(frontmatter.chain, fullPath, source, diagnostics);
+				if (chain && /\bparallel\s*\(/.test(chain)) {
+					const parsedChain = parseChainDeclaration(chain);
+					if (parsedChain.invalidSegments.length > 0 || parsedChain.steps.length === 0) {
+						diagnostics.push(
+							createDiagnostic(
+								"invalid-chain-declaration",
+								fullPath,
+								source,
+								`Skipping prompt template at ${fullPath}: invalid chain declaration segment ${JSON.stringify(parsedChain.invalidSegments[0] ?? chain)}.`,
+							),
+						);
+						continue;
+					}
+				}
 				let subagent = normalizeSubagent(frontmatter.subagent, fullPath, source, diagnostics);
 				const cwd = normalizeCwd(frontmatter.cwd, fullPath, source, diagnostics);
 				const inheritContext = normalizeInheritContext(frontmatter.inheritContext, fullPath, source, diagnostics);

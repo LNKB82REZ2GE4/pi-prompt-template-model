@@ -9,6 +9,7 @@ import {
 	PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT,
+	PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT,
 } from "../subagent-runtime.js";
 
 function withRuntime(run: (root: string) => Promise<void>) {
@@ -247,28 +248,46 @@ test("executeSubagentPromptStep fails when delegated response has no assistant t
 	});
 });
 
-test("executeSubagentPromptStep times out when no start event is emitted", async () => {
+test("executeSubagentPromptStep fails immediately when no bridge is listening", async () => {
 	await withRuntime(async (root) => {
-		const previous = process.env.PI_PROMPT_SUBAGENT_START_TIMEOUT_MS;
-		process.env.PI_PROMPT_SUBAGENT_START_TIMEOUT_MS = "10";
-		try {
-			const pi = createPi();
-			const ctx = createCtx(root);
-			await assert.rejects(
-				() =>
-					executeSubagentPromptStep({
-						pi,
-						prompt,
-						args: [],
-						ctx,
-						currentModel: ctx.model,
-					}),
-				/did not start within \d+s/i,
-			);
-		} finally {
-			if (previous === undefined) delete process.env.PI_PROMPT_SUBAGENT_START_TIMEOUT_MS;
-			else process.env.PI_PROMPT_SUBAGENT_START_TIMEOUT_MS = previous;
-		}
+		const pi = createPi();
+		const ctx = createCtx(root);
+		// No listener registered for REQUEST_EVENT — simulates subagent extension
+		// not loaded or shadowed by another extension with the same name.
+		await assert.rejects(
+			() =>
+				executeSubagentPromptStep({
+					pi,
+					prompt,
+					args: [],
+					ctx,
+					currentModel: ctx.model,
+				}),
+			/no subagent runtime responded/i,
+		);
+	});
+});
+
+test("executeSubagentPromptStep fast-fail error mentions the agent name", async () => {
+	await withRuntime(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		await assert.rejects(
+			() =>
+				executeSubagentPromptStep({
+					pi,
+					prompt,
+					args: [],
+					ctx,
+					currentModel: ctx.model,
+				}),
+			(error: Error) => {
+				assert.match(error.message, /no subagent runtime responded/i);
+				assert.match(error.message, /delegate/);
+				assert.ok(!error.message.includes("do work"), "should not include prompt content in error");
+				return true;
+			},
+		);
 	});
 });
 
@@ -318,5 +337,145 @@ test("executeSubagentPromptStep emits cancel on escape in UI mode", async () => 
 			/cancelled/i,
 		);
 		assert.ok(cancelledRequestId);
+	});
+});
+
+test("executeSubagentPromptStep delegates parallel prompts with tasks payload", async () => {
+	await withRuntime(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		let requestTasks: Array<{ agent: string; task: string; model?: string }> | undefined;
+
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const request = data as any;
+			requestTasks = request.tasks;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [],
+				parallelResults: [
+					{
+						agent: "delegate",
+						messages: [{ role: "assistant", content: [{ type: "text", text: "Frontend issues." }] }],
+						isError: false,
+					},
+					{
+						agent: "reviewer",
+						messages: [
+							{
+								role: "assistant",
+								content: [
+									{ type: "toolCall", id: "2", name: "write", arguments: { path: "report.md" } },
+									{ type: "text", text: "Backend issues." },
+								],
+							},
+						],
+						isError: false,
+					},
+				],
+				isError: false,
+			});
+		});
+
+		const result = await executeSubagentPromptStep({
+			pi,
+			parallel: [
+				{ prompt, args: [] },
+				{ prompt: { ...prompt, name: "review", subagent: "reviewer" }, args: [] },
+			],
+			ctx,
+			currentModel: ctx.model,
+		});
+		assert.equal(Array.isArray(requestTasks), true);
+		assert.equal(requestTasks?.length, 2);
+		assert.equal(requestTasks?.[0]?.model, "anthropic/claude-sonnet-4-20250514");
+		assert.equal(requestTasks?.[1]?.model, "anthropic/claude-sonnet-4-20250514");
+		assert.equal(result?.changed, true);
+		assert.equal(pi.customMessages.length, 1);
+	});
+});
+
+test("executeSubagentPromptStep prefers aggregate parallel status over first-task tool status", async () => {
+	await withRuntime(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		ctx.hasUI = true;
+		const statusLines: string[] = [];
+		ctx.ui.setStatus = (key: string, value?: string) => {
+			if (key === "prompt-subagent" && value) statusLines.push(value);
+		};
+
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const request = data as any;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
+				requestId: request.requestId,
+				currentTool: "read",
+				currentToolArgs: "a.ts",
+				toolCount: 1,
+				taskProgress: [
+					{ index: 0, agent: "delegate", status: "running", currentTool: "read", currentToolArgs: "a.ts" },
+					{ index: 1, agent: "reviewer", status: "pending" },
+				],
+			});
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [],
+				parallelResults: [
+					{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "A" }] }], isError: false },
+					{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "B" }] }], isError: false },
+				],
+				isError: false,
+			});
+		});
+
+		await executeSubagentPromptStep({
+			pi,
+			parallel: [
+				{ prompt, args: [] },
+				{ prompt: { ...prompt, name: "review", subagent: "reviewer" }, args: [] },
+			],
+			ctx,
+			currentModel: ctx.model,
+		});
+
+		assert.ok(statusLines.some((line) => line.includes("parallel 0/2 running")));
+		assert.equal(statusLines.some((line) => line.includes("running read")), false);
+	});
+});
+
+test("executeSubagentPromptStep fails on parallel task errors", async () => {
+	await withRuntime(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const request = data as any;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [],
+				parallelResults: [
+					{
+						agent: "delegate",
+						messages: [],
+						isError: true,
+						errorText: "scan failed",
+					},
+				],
+				isError: false,
+			});
+		});
+
+		await assert.rejects(
+			() =>
+				executeSubagentPromptStep({
+					pi,
+					parallel: [{ prompt, args: [] }],
+					ctx,
+					currentModel: ctx.model,
+				}),
+			/scan failed/i,
+		);
 	});
 });

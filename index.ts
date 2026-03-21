@@ -2,7 +2,7 @@ import type { Model } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
 import { extractLoopCount, extractLoopFlags, extractSubagentOverride, parseCommandArgs, type SubagentOverride } from "./args.js";
-import { parseChainSteps, parseChainDeclaration, type ChainStep } from "./chain-parser.js";
+import { parseChainSteps, parseChainDeclaration, type ChainStep, type ChainStepOrParallel, type ParallelChainStep } from "./chain-parser.js";
 import { generateIterationSummary, didIterationMakeChanges, getIterationEntries } from "./loop-utils.js";
 import { notify, summarizePromptDiagnostics, diagnosticsFingerprint } from "./notifications.js";
 import { preparePromptExecution } from "./prompt-execution.js";
@@ -184,6 +184,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return prompt.subagent !== undefined || override?.enabled === true;
 	}
 
+	function isParallelChainStep(step: ChainStepOrParallel): step is ParallelChainStep {
+		return "parallel" in step;
+	}
+
 	async function executePromptStep(
 		prompt: PromptWithModel,
 		args: string[],
@@ -193,19 +197,25 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		inheritedModel?: Model<any>,
 	): Promise<PromptStepResult | "aborted"> {
 		if (shouldDelegatePrompt(prompt, override)) {
-			const delegated = await executeSubagentPromptStep({
-				pi,
-				prompt,
-				args,
-				ctx,
-				currentModel,
-				override,
-				inheritedModel,
-			});
-			if (!delegated) {
-				throw new Error(`Prompt \`${prompt.name}\` is not configured for delegated execution.`);
+			try {
+				const delegated = await executeSubagentPromptStep({
+					pi,
+					prompt,
+					args,
+					ctx,
+					currentModel,
+					override,
+					inheritedModel,
+				});
+				if (!delegated) {
+					notify(ctx, `Prompt \`${prompt.name}\` is not configured for delegated execution.`, "error");
+					return "aborted";
+				}
+				return { changed: delegated.changed };
+			} catch (error) {
+				notify(ctx, error instanceof Error ? error.message : String(error), "error");
+				return "aborted";
 			}
-			return { changed: delegated.changed };
 		}
 
 		const prepared =
@@ -477,7 +487,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	}
 
 	async function runSharedChainExecution(
-		steps: ChainStep[],
+		steps: ChainStepOrParallel[],
 		sharedArgs: string[],
 		totalIterations: number | null,
 		fresh: boolean,
@@ -487,14 +497,47 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		subagentOverride?: SubagentOverride,
 		cwdOverride?: string,
 	) {
+		const flattenChainSteps = (): ChainStep[] => {
+			const flattened: ChainStep[] = [];
+			for (const step of steps) {
+				if (isParallelChainStep(step)) {
+					flattened.push(...step.parallel);
+				} else {
+					flattened.push(step);
+				}
+			}
+			return flattened;
+		};
+
 		const validateChainSteps = (): boolean => {
-			const missingTemplates = steps.filter((step) => !prompts.has(step.name));
+			const flattened = flattenChainSteps();
+			const missingTemplates = flattened.filter((step) => !prompts.has(step.name));
 			if (missingTemplates.length > 0) {
 				notify(ctx, `Templates not found: ${missingTemplates.map((step) => step.name).join(", ")}`, "error");
 				return false;
 			}
 
 			for (const step of steps) {
+				if (isParallelChainStep(step)) {
+					for (const parallelStep of step.parallel) {
+						if (parallelStep.loopCount !== undefined) {
+							notify(ctx, `Step "${parallelStep.name}" in parallel() does not support per-task --loop.`, "error");
+							return false;
+						}
+						const stepPrompt = prompts.get(parallelStep.name);
+						if (!stepPrompt) continue;
+						if (stepPrompt.chain) {
+							notify(ctx, `Step "${parallelStep.name}" is a chain template. Chain nesting is not supported.`, "error");
+							return false;
+						}
+						if (!shouldDelegatePrompt(stepPrompt, subagentOverride)) {
+							notify(ctx, `Step "${parallelStep.name}" in parallel() must use delegated execution (subagent).`, "error");
+							return false;
+						}
+					}
+					continue;
+				}
+
 				const stepPrompt = prompts.get(step.name);
 				if (!stepPrompt) continue;
 				if (stepPrompt.chain) {
@@ -509,7 +552,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		if (!validateChainSteps()) return;
 
 		const originalModel = getCurrentModel(ctx);
-		const chainInheritedModel = getCurrentModel(ctx);
+		const chainInheritedModel = originalModel;
 		const originalThinking = pi.getThinkingLevel();
 		let currentModel = originalModel;
 		let currentThinking = originalThinking;
@@ -520,7 +563,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		const useConverge = isUnlimited ? true : converge;
 
 		const anchorId = fresh ? ctx.sessionManager.getLeafId() : null;
-		const chainStepNames = steps.map((step) => step.name).join(" -> ");
+		const chainStepNames = steps
+			.map((step) => (isParallelChainStep(step) ? `parallel(${step.parallel.map((item) => item.name).join(", ")})` : step.name))
+			.join(" -> ");
 		let completedIterations = 0;
 		let converged = false;
 		let chainErrorState: ExecutionErrorState = { hasError: false, error: undefined };
@@ -539,17 +584,77 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					if (!validateChainSteps()) break;
 				}
 
-				const templates = steps.map((step) => ({
-					...prompts.get(step.name)!,
-					...(cwdOverride ? { cwd: cwdOverride } : {}),
-					stepArgs: step.args,
-					stepLoop: step.loopCount ?? 1,
-				}));
+				const templates = steps.map((step) =>
+					isParallelChainStep(step)
+						? {
+							kind: "parallel" as const,
+							tasks: step.parallel.map((item) => ({
+								name: item.name,
+								args: item.args,
+								prompt: {
+									...prompts.get(item.name)!,
+									...(cwdOverride ? { cwd: cwdOverride } : {}),
+								},
+							})),
+						}
+						: {
+							kind: "single" as const,
+							template: {
+								...prompts.get(step.name)!,
+								...(cwdOverride ? { cwd: cwdOverride } : {}),
+								stepArgs: step.args,
+								stepLoop: step.loopCount ?? 1,
+							},
+						},
+				);
 				let aborted = false;
 				let iterationChanged = false;
+				let loopPrefix = "";
+				if (effectiveMax > 1) {
+					const label = totalIterations !== null ? `${iteration + 1}/${totalIterations}` : `${iteration + 1}`;
+					loopPrefix = `Loop ${label}, `;
+				}
 
-				for (const [index, template] of templates.entries()) {
+				for (const [index, stepTemplate] of templates.entries()) {
 					const stepNumber = index + 1;
+					if (stepTemplate.kind === "parallel") {
+						const stepNames = stepTemplate.tasks.map((task) => task.name).join(", ");
+						notify(ctx, `${loopPrefix}Step ${stepNumber}/${templates.length}: parallel(${stepNames})`, "info");
+						if (ctx.hasUI) {
+							ctx.ui.setStatus("prompt-chain", ctx.ui.theme.fg("warning", `step ${stepNumber}/${templates.length}: parallel(${stepNames})`));
+						}
+
+						let delegated;
+						try {
+							delegated = await executeSubagentPromptStep({
+								pi,
+								ctx,
+								currentModel,
+								override: subagentOverride,
+								inheritedModel: chainInheritedModel,
+								parallel: stepTemplate.tasks.map((task) => ({
+									prompt: task.prompt,
+									args: task.args.length > 0 ? task.args : sharedArgs,
+								})),
+							});
+						} catch (error) {
+							notify(ctx, error instanceof Error ? error.message : String(error), "error");
+							aborted = true;
+							break;
+						}
+						if (!delegated) {
+							notify(ctx, "Parallel chain step was not delegated.", "error");
+							aborted = true;
+							break;
+						}
+
+						currentModel = getCurrentModel(ctx);
+						currentThinking = pi.getThinkingLevel();
+						if (delegated.changed) iterationChanged = true;
+						continue;
+					}
+
+					const template = stepTemplate.template;
 					const stepLoop = template.stepLoop;
 					const effectiveArgs = template.stepArgs.length > 0 ? template.stepArgs : sharedArgs;
 					const outerLoopState = loopState ? { ...loopState } : null;
@@ -565,14 +670,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 								updateLoopStatus(ctx);
 							}
 
-							const loopPrefix =
-								effectiveMax > 1
-									? totalIterations !== null
-										? `Loop ${iteration + 1}/${totalIterations}, `
-										: `Loop ${iteration + 1}, `
-									: "";
 							const iterSuffix = stepLoop > 1 ? ` (iter ${stepIteration + 1}/${stepLoop})` : "";
 							notify(ctx, `${loopPrefix}Step ${stepNumber}/${templates.length}: ${template.name}${iterSuffix} ${buildPromptCommandDescription(template)}`, "info");
+							if (ctx.hasUI) {
+								ctx.ui.setStatus("prompt-chain", ctx.ui.theme.fg("warning", `step ${stepNumber}/${templates.length}: ${template.name}`));
+							}
 
 							const stepIterationStartId = ctx.sessionManager.getLeafId();
 							const stepResult = await executePromptStep(
@@ -648,6 +750,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			freshCollapse = null;
 			accumulatedSummaries = [];
 			updateLoopStatus(ctx);
+			if (ctx.hasUI) {
+				ctx.ui.setStatus("prompt-chain", undefined);
+			}
 
 			if (!chainErrorState.hasError) {
 				notifyLoopCompletion(ctx, completedIterations, totalIterations, effectiveMax, converged, true);

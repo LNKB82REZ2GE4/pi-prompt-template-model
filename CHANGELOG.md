@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-03-21
+
+### Added
+- Chain step progress now shows in the status bar (e.g., `step 2/3: simplify`) and persists until the chain completes, instead of only appearing as a notification that scrolls away.
+- Added `parallel(...)` chain step support for delegated prompt templates, including parser/frontmatter validation, delegated task fan-out, aggregated result rendering, and per-task progress display.
+
+### Fixed
+- Delegated subagent errors now show as clean notifications instead of extension crash messages with stack traces, matching how other validation errors (missing skill, missing template, etc.) are presented.
+- When no subagent bridge is listening (extension not loaded, name collision with another extension), delegation now fails immediately with a diagnostic message instead of silently waiting 15 seconds before timing out.
+- Timeout error message no longer dumps the full rendered prompt content; uses the agent name instead.
+- Parallel delegated status now prefers aggregate `parallel X/Y running` updates over first-task tool labels, avoiding misleading `running <tool>` status lines during multi-task execution.
+
 ## [0.6.2] - 2026-03-20
 
 ### Added

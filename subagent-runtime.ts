@@ -11,10 +11,24 @@ export const PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT = "prompt-template:subagent:c
 export const PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE = "prompt-template-subagent";
 export const DEFAULT_SUBAGENT_NAME = "delegate";
 
+export interface DelegatedSubagentTask {
+	agent: string;
+	task: string;
+	model?: string;
+}
+
+export interface DelegatedSubagentParallelResult {
+	agent: string;
+	messages: unknown[];
+	isError: boolean;
+	errorText?: string;
+}
+
 export interface DelegatedSubagentRequest {
 	requestId: string;
 	agent: string;
 	task: string;
+	tasks?: DelegatedSubagentTask[];
 	context: "fresh" | "fork";
 	model: string;
 	cwd: string;
@@ -28,12 +42,26 @@ export interface DelegatedSubagentResponse {
 	model: string;
 	cwd: string;
 	messages: unknown[];
+	parallelResults?: DelegatedSubagentParallelResult[];
 	isError: boolean;
 	errorText?: string;
 }
 
 export interface DelegatedSubagentUpdate {
 	requestId: string;
+	currentTool?: string;
+	currentToolArgs?: string;
+	recentOutput?: string;
+	toolCount?: number;
+	durationMs?: number;
+	tokens?: number;
+	taskProgress?: DelegatedSubagentTaskProgress[];
+}
+
+export interface DelegatedSubagentTaskProgress {
+	index?: number;
+	agent: string;
+	status?: string;
 	currentTool?: string;
 	currentToolArgs?: string;
 	recentOutput?: string;
@@ -52,6 +80,7 @@ export interface DelegatedSubagentLiveState {
 	toolCount: number;
 	durationMs: number;
 	tokens: number;
+	taskProgress: DelegatedSubagentTaskProgress[];
 	startedAt: number;
 	updatedAt: number;
 }
@@ -125,6 +154,7 @@ export function updateDelegatedLiveState(requestId: string, update: Partial<Dele
 		toolCount: 0,
 		durationMs: 0,
 		tokens: 0,
+		taskProgress: [],
 		startedAt: now,
 		updatedAt: now,
 	};
@@ -140,6 +170,7 @@ export function updateDelegatedLiveState(requestId: string, update: Partial<Dele
 		toolCount: update.toolCount ?? existing.toolCount,
 		durationMs: update.durationMs ?? (now - existing.startedAt),
 		tokens: update.tokens ?? existing.tokens,
+		taskProgress: update.taskProgress ?? existing.taskProgress,
 		lastTool,
 		lastToolArgs,
 		startedAt: existing.startedAt,
@@ -156,6 +187,7 @@ export function appendDelegatedLiveOutput(requestId: string, line?: string): voi
 		toolCount: 0,
 		durationMs: 0,
 		tokens: 0,
+		taskProgress: [],
 		startedAt: fallbackNow,
 		updatedAt: fallbackNow,
 	};

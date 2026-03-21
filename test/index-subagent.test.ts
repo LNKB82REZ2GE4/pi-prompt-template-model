@@ -257,3 +257,169 @@ test("queued run-prompt executes delegated commands", async () => {
 		assert.equal(pi.customMessages.length, 1);
 	});
 });
+
+test("parallel chain step delegates with tasks payload", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(scan-fe, scan-be)"\n---\nignored');
+		writeFileSync(join(cwd, ".pi", "prompts", "scan-fe.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: delegate\n---\nscan fe");
+		writeFileSync(join(cwd, ".pi", "prompts", "scan-be.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: reviewer\n---\nscan be");
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd);
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		let requestTasks: Array<{ agent: string; task: string; model?: string }> | undefined;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+			const request = payload as any;
+			requestTasks = request.tasks;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [],
+				parallelResults: [
+					{
+						agent: "delegate",
+						messages: [{ role: "assistant", content: [{ type: "text", text: "fe done" }] }],
+						isError: false,
+					},
+					{
+						agent: "reviewer",
+						messages: [{ role: "assistant", content: [{ type: "text", text: "be done" }] }],
+						isError: false,
+					},
+				],
+				isError: false,
+			});
+		});
+
+		const pipeline = pi.commands.get("pipeline");
+		assert.ok(pipeline);
+		await pipeline.handler("", ctx);
+
+		assert.equal(Array.isArray(requestTasks), true);
+		assert.equal(requestTasks?.length, 2);
+		assert.equal(requestTasks?.[0]?.agent, "delegate");
+		assert.equal(requestTasks?.[1]?.agent, "reviewer");
+		assert.equal(pi.customMessages.length, 1);
+		assert.equal(pi.userMessages.length, 0);
+	});
+});
+
+test("parallel chain task failure aborts remaining chain steps", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(scan-fe, scan-be) -> review"\n---\nignored');
+		writeFileSync(join(cwd, ".pi", "prompts", "scan-fe.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: true\n---\nscan fe");
+		writeFileSync(join(cwd, ".pi", "prompts", "scan-be.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: true\n---\nscan be");
+		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nreview");
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd);
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		let requestCount = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+			const request = payload as any;
+			requestCount++;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [],
+				parallelResults: [
+					{ agent: "delegate", messages: [], isError: true, errorText: "scan failed" },
+					{ agent: "delegate", messages: [], isError: false },
+				],
+				isError: false,
+			});
+		});
+
+		const pipeline = pi.commands.get("pipeline");
+		assert.ok(pipeline);
+		await pipeline.handler("", ctx);
+
+		assert.equal(requestCount, 1);
+		assert.equal(pi.userMessages.length, 0);
+		assert.equal(pi.customMessages.length, 0);
+	});
+});
+
+test("successful parallel step continues to next sequential step", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(scan-fe, scan-be) -> review"\n---\nignored');
+		writeFileSync(join(cwd, ".pi", "prompts", "scan-fe.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: true\n---\nscan fe");
+		writeFileSync(join(cwd, ".pi", "prompts", "scan-be.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: true\n---\nscan be");
+		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nreview findings");
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd);
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+			const request = payload as any;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [],
+				parallelResults: [
+					{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "fe done" }] }], isError: false },
+					{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "be done" }] }], isError: false },
+				],
+				isError: false,
+			});
+		});
+
+		const pipeline = pi.commands.get("pipeline");
+		assert.ok(pipeline);
+		await pipeline.handler("", ctx);
+
+		assert.equal(pi.customMessages.length, 1);
+		assert.equal(pi.userMessages.length, 1);
+		assert.equal(pi.userMessages[0], "review findings");
+	});
+});
+
+test("chain-prompts CLI command handles parallel() syntax", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "scan-fe.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: true\n---\nscan fe");
+		writeFileSync(join(cwd, ".pi", "prompts", "scan-be.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: true\n---\nscan be");
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd);
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		let requestTasks: Array<{ agent: string; task: string }> | undefined;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+			const request = payload as any;
+			requestTasks = request.tasks;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [],
+				parallelResults: [
+					{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "fe" }] }], isError: false },
+					{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "be" }] }], isError: false },
+				],
+				isError: false,
+			});
+		});
+
+		const chainPrompts = pi.commands.get("chain-prompts");
+		assert.ok(chainPrompts);
+		await chainPrompts.handler("parallel(scan-fe, scan-be)", ctx);
+
+		assert.equal(Array.isArray(requestTasks), true);
+		assert.equal(requestTasks?.length, 2);
+		assert.equal(pi.customMessages.length, 1);
+	});
+});

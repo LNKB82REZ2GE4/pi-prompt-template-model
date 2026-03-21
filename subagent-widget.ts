@@ -1,6 +1,6 @@
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import { Box, Container, Spacer, Text } from "@mariozechner/pi-tui";
-import { getDelegatedLiveState, type DelegatedSubagentLiveState } from "./subagent-runtime.js";
+import { getDelegatedLiveState, type DelegatedSubagentLiveState, type DelegatedSubagentTask } from "./subagent-runtime.js";
 
 export const DELEGATED_WIDGET_KEY = "prompt-subagent-progress";
 
@@ -23,10 +23,13 @@ export function createDelegatedProgressWidget(
 	agent: string,
 	context: "fresh" | "fork",
 	task: string,
+	tasks: DelegatedSubagentTask[] | undefined,
 	theme: Theme,
 ): Container & { dispose?(): void } {
 	const contextSuffix = context === "fork" ? theme.fg("warning", " [fork]") : "";
 	const taskPreview = task.length > 120 ? `${task.slice(0, 120)}...` : task;
+	const parallelTasks = tasks ?? [];
+	const isParallel = parallelTasks.length > 0;
 
 	const container = new Container();
 	container.addChild(new Spacer(1));
@@ -41,7 +44,7 @@ export function createDelegatedProgressWidget(
 		const key = stateKey(state, elapsed);
 		if (key !== lastKey) {
 			lastKey = key;
-			rebuildBox(box, agent, contextSuffix, taskPreview, state, elapsed, theme);
+			rebuildBox(box, agent, contextSuffix, taskPreview, parallelTasks, isParallel, state, elapsed, theme);
 		}
 		return Container.prototype.render.call(container, width);
 	};
@@ -53,7 +56,10 @@ function stateKey(state: DelegatedSubagentLiveState | undefined, elapsed: number
 	if (!state) return "none";
 	const elapsedBucket = Math.floor(elapsed / 1000);
 	const tool = state.currentTool ?? state.lastTool ?? "";
-	return `${state.status}|${tool}|${state.toolCount}|${state.tokens}|${state.recentOutput.length}|${elapsedBucket}`;
+	const taskProgressKey = state.taskProgress
+		.map((entry) => `${entry.index ?? ""}:${entry.agent}:${entry.status ?? ""}:${entry.currentTool ?? ""}:${entry.toolCount ?? 0}`)
+		.join("|");
+	return `${state.status}|${tool}|${state.toolCount}|${state.tokens}|${state.recentOutput.length}|${taskProgressKey}|${elapsedBucket}`;
 }
 
 function rebuildBox(
@@ -61,6 +67,8 @@ function rebuildBox(
 	agent: string,
 	contextSuffix: string,
 	taskPreview: string,
+	parallelTasks: DelegatedSubagentTask[],
+	isParallel: boolean,
 	state: DelegatedSubagentLiveState | undefined,
 	elapsed: number,
 	theme: Theme,
@@ -75,13 +83,52 @@ function rebuildBox(
 	const stats = isThinking
 		? `thinking, ${duration}`
 		: `${toolCount} tool${toolCount === 1 ? "" : "s"}, ${tokens} tok, ${duration}`;
+	const taskProgress = state?.taskProgress ?? [];
 
-	box.addChild(new Text(
-		`${icon} ${theme.fg("toolTitle", theme.bold(agent))}${contextSuffix} | ${stats}`,
-		0, 0,
-	));
+	if (isParallel) {
+		const completedCount = taskProgress.filter((entry) => entry.status === "completed").length;
+		const runningLabel = `parallel ${completedCount}/${parallelTasks.length} running`;
+		box.addChild(new Text(`${icon} ${theme.fg("toolTitle", theme.bold(runningLabel))}${contextSuffix} | ${stats}`, 0, 0));
+	} else {
+		box.addChild(new Text(
+			`${icon} ${theme.fg("toolTitle", theme.bold(agent))}${contextSuffix} | ${stats}`,
+			0, 0,
+		));
+	}
 	box.addChild(new Spacer(1));
-	box.addChild(new Text(theme.fg("dim", `Task: ${taskPreview}`), 0, 0));
+	if (!isParallel) {
+		box.addChild(new Text(theme.fg("dim", `Task: ${taskPreview}`), 0, 0));
+	}
+
+	if (isParallel) {
+		for (let index = 0; index < parallelTasks.length; index++) {
+			const task = parallelTasks[index]!;
+			const progress =
+				taskProgress.find((entry) => entry.index === index) ??
+				taskProgress.find((entry) => entry.index === undefined && entry.agent === task.agent) ??
+				taskProgress[index];
+			const taskStatus = progress?.status ?? "pending";
+			if (taskStatus === "running") {
+				const runningTool = progress.currentTool ? ` ${progress.currentTool}...` : "";
+				box.addChild(new Text(theme.fg("dim", `  ${task.agent}: running${runningTool}`), 0, 0));
+				continue;
+			}
+			if (taskStatus === "completed") {
+				const toolSuffix =
+					progress?.toolCount !== undefined
+						? ` (${progress.toolCount} tool${progress.toolCount === 1 ? "" : "s"})`
+						: "";
+				box.addChild(new Text(theme.fg("dim", `  ${task.agent}: completed${toolSuffix}`), 0, 0));
+				continue;
+			}
+			if (taskStatus === "failed") {
+				box.addChild(new Text(theme.fg("dim", `  ${task.agent}: failed`), 0, 0));
+				continue;
+			}
+			box.addChild(new Text(theme.fg("dim", `  ${task.agent}: pending`), 0, 0));
+		}
+		return;
+	}
 
 	const activeTool = state?.currentTool;
 	const displayTool = activeTool ?? state?.lastTool;

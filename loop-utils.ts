@@ -4,6 +4,7 @@ import { PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE } from "./subagent-runtime.js";
 
 interface DelegatedMessageDetails {
 	messages?: Message[];
+	parallelResults?: Array<{ messages?: Message[] }>;
 }
 
 function collectAssistantActions(messages: Message[], filesRead: Set<string>, filesWritten: Set<string>): { commandCount: number; lastText: string } {
@@ -55,10 +56,16 @@ export function generateIterationSummary(entries: SessionEntry[], task: string, 
 		}
 
 		const delegated = delegatedDetails(entry);
-		if (!delegated?.messages) continue;
-		const collected = collectAssistantActions(delegated.messages, filesRead, filesWritten);
-		commandCount += collected.commandCount;
-		if (collected.lastText) lastAssistantText = collected.lastText;
+		if (!delegated) continue;
+		const messageGroups =
+			delegated.parallelResults && delegated.parallelResults.length > 0
+				? delegated.parallelResults.map((result) => result.messages ?? [])
+				: delegated.messages ? [delegated.messages] : [];
+		for (const messages of messageGroups) {
+			const collected = collectAssistantActions(messages, filesRead, filesWritten);
+			commandCount += collected.commandCount;
+			if (collected.lastText) lastAssistantText = collected.lastText;
+		}
 	}
 
 	let summary = totalIterations !== null ? `[Loop iteration ${iteration}/${totalIterations}]\nTask: "${task}"` : `[Loop iteration ${iteration}]\nTask: "${task}"`;
@@ -92,12 +99,18 @@ export function didIterationMakeChanges(entries: SessionEntry[]): boolean {
 		}
 
 		const delegated = delegatedDetails(entry);
-		if (!delegated?.messages) continue;
-		for (const message of delegated.messages) {
-			if (message.role !== "assistant") continue;
-			for (const block of (message as AssistantMessage).content) {
-				if (block.type !== "toolCall") continue;
-				if (block.name === "write" || block.name === "edit") return true;
+		if (!delegated) continue;
+		const delegatedGroups =
+			delegated.parallelResults && delegated.parallelResults.length > 0
+				? delegated.parallelResults.map((result) => result.messages ?? [])
+				: [delegated.messages ?? []];
+		for (const messages of delegatedGroups) {
+			for (const message of messages) {
+				if (message.role !== "assistant") continue;
+				for (const block of (message as AssistantMessage).content) {
+					if (block.type !== "toolCall") continue;
+					if (block.name === "write" || block.name === "edit") return true;
+				}
 			}
 		}
 	}

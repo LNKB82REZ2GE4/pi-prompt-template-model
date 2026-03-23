@@ -131,9 +131,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 		for (const command of pi.getCommands()) {
 			if (command.source !== "skill") continue;
-			if (!command.path) continue;
+			if (!command.sourceInfo.path) continue;
 			if (!candidates.has(command.name)) continue;
-			return command.path;
+			return command.sourceInfo.path;
 		}
 
 		return undefined;

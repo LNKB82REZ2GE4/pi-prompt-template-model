@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-03-23
+
+### Fixed
+- Updated skill command resolution to use `sourceInfo.path` instead of the removed `path` field on `SlashCommandInfo`, fixing compatibility with pi-coding-agent 0.62.0 source provenance changes.
+
 ## [0.6.3] - 2026-03-21
 
 ### Added

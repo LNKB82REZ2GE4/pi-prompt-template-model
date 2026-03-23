@@ -39,7 +39,7 @@ class FakePi {
 			};
 		},
 	};
-	skillCommands: Array<{ name: string; source: "skill"; path?: string }> = [];
+	skillCommands: Array<{ name: string; source: "skill"; sourceInfo: { path: string } }> = [];
 	userMessages: string[] = [];
 	setModelCalls: string[] = [];
 	currentModel = ACTIVE_MODEL;
@@ -1022,7 +1022,7 @@ test("skill resolves from registered skill commands and supports skill: prefix",
 		writeFileSync(skillPath, "---\nname: external-skill\ndescription: external\n---\nUse external skill.");
 
 		const pi = new FakePi();
-		pi.skillCommands = [{ name: "skill:external-skill", source: "skill", path: skillPath }];
+		pi.skillCommands = [{ name: "skill:external-skill", source: "skill", sourceInfo: { path: skillPath } }];
 		promptModelExtension(pi as never);
 		const { ctx } = createContext(cwd, pi);
 		await pi.emit("session_start", {}, ctx);

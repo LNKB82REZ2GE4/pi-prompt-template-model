@@ -62,6 +62,7 @@ All fields are optional. Templates that don't use any extension features (no `mo
 | `thinking` | — | Thinking level for the model: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. |
 | `description` | — | Short text shown next to the command in autocomplete. |
 | `chain` | — | Declares a reusable pipeline of templates (`step -> step`). When set, the body is ignored. See [Chain Templates](#chain-templates). |
+| `chainContext` | — | Chain templates only. Set to `summary` so delegated steps receive a compact summary of what previous steps did. Steps with `inheritContext: true` are excluded. See [Chain context for delegated steps](#chain-context-for-delegated-steps). |
 
 ### Execution Control
 
@@ -328,6 +329,33 @@ This runs the full analyze → fix chain 3 times, with fresh context between ite
 
 When a chain template sets `cwd`, it becomes the default delegated subprocess working directory for all delegated steps in that chain. Runtime `--cwd=<path>` overrides the chain template value.
 
+### Chain context for delegated steps
+
+Delegated chain steps start fresh — they don't see what earlier steps did. Chain context prepends a compact summary of previous steps to each delegated task so later steps can build on earlier work.
+
+Enable it chain-wide with `chainContext: summary` in frontmatter or `--chain-context` on the CLI:
+
+```markdown
+---
+chain: analyze -> fix
+chainContext: summary
+---
+```
+
+```
+/chain-prompts analyze -> fix --chain-context
+```
+
+To enable it for a single step, attach `--with-context` to that step name:
+
+```
+/chain-prompts analyze -> reviewer --with-context -> summarize
+```
+
+Here only `reviewer` receives the summary of `analyze`. The `summarize` step does not.
+
+Steps using `inheritContext: true` already fork the full parent conversation and skip the summary preamble. `--with-context` is not supported inside `parallel(...)` groups. When a chain uses `loop`, summaries reset each iteration.
+
 ### Parallel and looping from the CLI
 
 Parallel groups work in `/chain-prompts` too:
@@ -359,6 +387,7 @@ Once enabled, the agent sees `run-prompt` in its tool list:
 
 ```
 run-prompt({ command: "deslop --loop 5 --fresh" })
+run-prompt({ command: "chain-prompts analyze -> fix --chain-context" })
 run-prompt({ command: "chain-prompts analyze -> fix --loop 3" })
 run-prompt({ command: "deslop --subagent" })
 ```

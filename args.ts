@@ -163,6 +163,50 @@ export function extractLoopFlags(argsString: string): LoopFlags {
 	return { args: cleaned.trim(), fresh, converge: !noConverge };
 }
 
+export function extractChainContextFlag(argsString: string): { args: string; chainContext: boolean } {
+	let chainContext = false;
+	const tokensToRemove: Array<{ start: number; end: number }> = [];
+
+	let i = 0;
+	while (i < argsString.length) {
+		const char = argsString[i];
+
+		if (char === '"' || char === "'") {
+			const quote = char;
+			i++;
+			while (i < argsString.length && argsString[i] !== quote) i++;
+			if (i < argsString.length) i++;
+			continue;
+		}
+
+		if (/\s/.test(char)) {
+			i++;
+			continue;
+		}
+
+		const tokenStart = i;
+		while (i < argsString.length && !/\s/.test(argsString[i])) i++;
+		const token = argsString.slice(tokenStart, i);
+
+		if (token === "--chain-context") {
+			chainContext = true;
+			tokensToRemove.push({ start: tokenStart, end: i });
+		}
+	}
+
+	if (tokensToRemove.length === 0) {
+		return { args: argsString.trim(), chainContext: false };
+	}
+
+	tokensToRemove.sort((a, b) => b.start - a.start);
+	let cleaned = argsString;
+	for (const { start, end } of tokensToRemove) {
+		cleaned = cleaned.slice(0, start) + cleaned.slice(end);
+	}
+
+	return { args: cleaned.trim(), chainContext };
+}
+
 export function extractSubagentOverride(argsString: string): SubagentOverrideExtraction {
 	let override: SubagentOverride | undefined;
 	let cwdRaw: string | undefined;

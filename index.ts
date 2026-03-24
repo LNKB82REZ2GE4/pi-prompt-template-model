@@ -1,9 +1,9 @@
 import type { Model } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
-import { extractLoopCount, extractLoopFlags, extractSubagentOverride, parseCommandArgs, type SubagentOverride } from "./args.js";
+import { extractChainContextFlag, extractLoopCount, extractLoopFlags, extractSubagentOverride, parseCommandArgs, type SubagentOverride } from "./args.js";
 import { parseChainSteps, parseChainDeclaration, type ChainStep, type ChainStepOrParallel, type ParallelChainStep } from "./chain-parser.js";
-import { generateIterationSummary, didIterationMakeChanges, getIterationEntries } from "./loop-utils.js";
+import { generateChainStepSummary, generateIterationSummary, didIterationMakeChanges, getIterationEntries } from "./loop-utils.js";
 import { notify, summarizePromptDiagnostics, diagnosticsFingerprint } from "./notifications.js";
 import { preparePromptExecution } from "./prompt-execution.js";
 import { buildPromptCommandDescription, expandCwdPath, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptWithModel } from "./prompt-loader.js";
@@ -195,6 +195,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		currentModel: Model<any> | undefined,
 		override?: SubagentOverride,
 		inheritedModel?: Model<any>,
+		taskPreamble?: string,
 	): Promise<PromptStepResult | "aborted"> {
 		if (shouldDelegatePrompt(prompt, override)) {
 			try {
@@ -206,6 +207,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					currentModel,
 					override,
 					inheritedModel,
+					taskPreamble,
 				});
 				if (!delegated) {
 					notify(ctx, `Prompt \`${prompt.name}\` is not configured for delegated execution.`, "error");
@@ -496,6 +498,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		ctx: ExtensionCommandContext,
 		subagentOverride?: SubagentOverride,
 		cwdOverride?: string,
+		chainContextEnabled = false,
 	) {
 		const flattenChainSteps = (): ChainStep[] => {
 			const flattened: ChainStep[] = [];
@@ -522,6 +525,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					for (const parallelStep of step.parallel) {
 						if (parallelStep.loopCount !== undefined) {
 							notify(ctx, `Step "${parallelStep.name}" in parallel() does not support per-task --loop.`, "error");
+							return false;
+						}
+						if (parallelStep.withContext === true) {
+							notify(ctx, `Step "${parallelStep.name}" in parallel() does not support per-task --with-context.`, "error");
 							return false;
 						}
 						const stepPrompt = prompts.get(parallelStep.name);
@@ -599,14 +606,18 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 						}
 						: {
 							kind: "single" as const,
-							template: {
-								...prompts.get(step.name)!,
-								...(cwdOverride ? { cwd: cwdOverride } : {}),
+							singleStep: {
+								prompt: {
+									...prompts.get(step.name)!,
+									...(cwdOverride ? { cwd: cwdOverride } : {}),
+								},
 								stepArgs: step.args,
 								stepLoop: step.loopCount ?? 1,
+								stepWithContext: step.withContext === true,
 							},
 						},
 				);
+				const chainStepSummaries: string[] = [];
 				let aborted = false;
 				let iterationChanged = false;
 				let loopPrefix = "";
@@ -619,9 +630,16 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					const stepNumber = index + 1;
 					if (stepTemplate.kind === "parallel") {
 						const stepNames = stepTemplate.tasks.map((task) => task.name).join(", ");
+						const stepLabel = `parallel(${stepNames})`;
 						notify(ctx, `${loopPrefix}Step ${stepNumber}/${templates.length}: parallel(${stepNames})`, "info");
 						if (ctx.hasUI) {
 							ctx.ui.setStatus("prompt-chain", ctx.ui.theme.fg("warning", `step ${stepNumber}/${templates.length}: parallel(${stepNames})`));
+						}
+						const stepStartId = ctx.sessionManager.getLeafId();
+						let taskPreamble: string | undefined;
+						const isForkedParallelContext = stepTemplate.tasks.some((task) => task.prompt.inheritContext === true);
+						if (chainContextEnabled && !isForkedParallelContext && chainStepSummaries.length > 0) {
+							taskPreamble = `[Previous chain steps]\n\n${chainStepSummaries.join("\n\n")}`;
 						}
 
 						let delegated;
@@ -636,6 +654,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 									prompt: task.prompt,
 									args: task.args.length > 0 ? task.args : sharedArgs,
 								})),
+								taskPreamble,
 							});
 						} catch (error) {
 							notify(ctx, error instanceof Error ? error.message : String(error), "error");
@@ -650,14 +669,21 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 						currentModel = getCurrentModel(ctx);
 						currentThinking = pi.getThinkingLevel();
-						if (delegated.changed) iterationChanged = true;
+						const stepEntries = getIterationEntries(ctx, stepStartId);
+						if (didIterationMakeChanges(stepEntries)) iterationChanged = true;
+						chainStepSummaries.push(generateChainStepSummary(stepEntries, stepLabel, stepNumber));
 						continue;
 					}
 
-					const template = stepTemplate.template;
-					const stepLoop = template.stepLoop;
-					const effectiveArgs = template.stepArgs.length > 0 ? template.stepArgs : sharedArgs;
+					const singleStep = stepTemplate.singleStep;
+					const stepLoop = singleStep.stepLoop;
+					const effectiveArgs = singleStep.stepArgs.length > 0 ? singleStep.stepArgs : sharedArgs;
+					const shouldInjectSummary =
+						shouldDelegatePrompt(singleStep.prompt, subagentOverride) &&
+						singleStep.prompt.inheritContext !== true &&
+						(chainContextEnabled || singleStep.stepWithContext === true);
 					const outerLoopState = loopState ? { ...loopState } : null;
+					const stepStartId = ctx.sessionManager.getLeafId();
 					if (stepLoop > 1) {
 						loopState = { currentIteration: 1, totalIterations: stepLoop };
 						updateLoopStatus(ctx);
@@ -671,19 +697,27 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 							}
 
 							const iterSuffix = stepLoop > 1 ? ` (iter ${stepIteration + 1}/${stepLoop})` : "";
-							notify(ctx, `${loopPrefix}Step ${stepNumber}/${templates.length}: ${template.name}${iterSuffix} ${buildPromptCommandDescription(template)}`, "info");
+							notify(
+								ctx,
+								`${loopPrefix}Step ${stepNumber}/${templates.length}: ${singleStep.prompt.name}${iterSuffix} ${buildPromptCommandDescription(singleStep.prompt)}`,
+								"info",
+							);
 							if (ctx.hasUI) {
-								ctx.ui.setStatus("prompt-chain", ctx.ui.theme.fg("warning", `step ${stepNumber}/${templates.length}: ${template.name}`));
+								ctx.ui.setStatus("prompt-chain", ctx.ui.theme.fg("warning", `step ${stepNumber}/${templates.length}: ${singleStep.prompt.name}`));
 							}
+							const taskPreamble = shouldInjectSummary && chainStepSummaries.length > 0
+								? `[Previous chain steps]\n\n${chainStepSummaries.join("\n\n")}`
+								: undefined;
 
 							const stepIterationStartId = ctx.sessionManager.getLeafId();
 							const stepResult = await executePromptStep(
-								template,
+								singleStep.prompt,
 								effectiveArgs,
 								ctx,
 								currentModel,
 								subagentOverride,
 								chainInheritedModel,
+								taskPreamble,
 							);
 							if (stepResult === "aborted") {
 								aborted = true;
@@ -693,11 +727,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 							currentModel = getCurrentModel(ctx);
 							currentThinking = pi.getThinkingLevel();
 
-							const stepChanged = shouldDelegatePrompt(template, subagentOverride)
-								? stepResult.changed
-								: didIterationMakeChanges(getIterationEntries(ctx, stepIterationStartId));
-							if (stepChanged) iterationChanged = true;
-							if (stepLoop > 1 && template.converge !== false && !stepChanged) {
+							const stepIterationEntries = getIterationEntries(ctx, stepIterationStartId);
+							const stepIterationChanged = didIterationMakeChanges(stepIterationEntries);
+							if (stepLoop > 1 && singleStep.prompt.converge !== false && !stepIterationChanged) {
 								break;
 							}
 						}
@@ -709,6 +741,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					}
 
 					if (aborted) break;
+					const stepEntries = getIterationEntries(ctx, stepStartId);
+					if (didIterationMakeChanges(stepEntries)) iterationChanged = true;
+					chainStepSummaries.push(generateChainStepSummary(stepEntries, singleStep.prompt.name, stepNumber));
 				}
 
 				if (aborted) break;
@@ -782,11 +817,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		const argsWithoutSubagent = subagent.args;
 
 		if (prompt.chain) {
-			const loop = extractLoopCount(argsWithoutSubagent);
+			const extracted = extractChainContextFlag(argsWithoutSubagent);
+			const chainContextEnabled = extracted.chainContext || prompt.chainContext === "summary";
+			const loop = extractLoopCount(extracted.args);
 			let totalIterations: number | null = prompt.loop ?? 1;
 			let fresh = false;
 			let converge = true;
-			let cleanedArgs = argsWithoutSubagent;
+			let cleanedArgs = extracted.args;
 
 			if (loop) {
 				totalIterations = loop.loopCount;
@@ -794,7 +831,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				converge = loop.converge;
 				cleanedArgs = loop.args;
 			} else if (prompt.loop !== undefined) {
-				const flags = extractLoopFlags(argsWithoutSubagent);
+				const flags = extractLoopFlags(extracted.args);
 				fresh = flags.fresh;
 				converge = flags.converge;
 				cleanedArgs = flags.args;
@@ -821,6 +858,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				ctx,
 				subagent.override,
 				cwdOverride,
+				chainContextEnabled,
 			);
 			return;
 		}
@@ -962,8 +1000,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			notify(ctx, `Invalid --cwd path: must be absolute`, "error");
 			return;
 		}
-		const loop = extractLoopCount(subagent.args);
-		const cleanedArgs = loop ? loop.args : subagent.args;
+		const extracted = extractChainContextFlag(subagent.args);
+		const loop = extractLoopCount(extracted.args);
+		const cleanedArgs = loop ? loop.args : extracted.args;
 
 		const { steps, sharedArgs, invalidSegments } = parseChainSteps(cleanedArgs);
 		if (invalidSegments.length > 0) {
@@ -985,6 +1024,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			ctx,
 			subagent.override,
 			runtimeCwd,
+			extracted.chainContext,
 		);
 	}
 

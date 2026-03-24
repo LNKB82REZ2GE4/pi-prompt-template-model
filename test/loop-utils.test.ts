@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { didIterationMakeChanges, generateIterationSummary, getIterationEntries } from "../loop-utils.js";
+import { didIterationMakeChanges, generateChainStepSummary, generateIterationSummary, getIterationEntries } from "../loop-utils.js";
 
 const delegatedEntry = {
 	id: "delegated-1",
@@ -42,4 +42,52 @@ test("getIterationEntries falls back to full branch when start is missing", () =
 	};
 	assert.equal(getIterationEntries(ctx as any, null).length, 1);
 	assert.equal(getIterationEntries(ctx as any, "missing").length, 1);
+});
+
+test("generateChainStepSummary includes ordinary assistant actions", () => {
+	const entries = [
+		{
+			id: "msg-1",
+			type: "message",
+			message: {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: "1", name: "read", arguments: { path: "src/a.ts" } },
+					{ type: "toolCall", id: "2", name: "write", arguments: { path: "src/b.ts" } },
+					{ type: "toolCall", id: "3", name: "bash", arguments: { command: "npm test" } },
+					{ type: "text", text: "Applied fixes." },
+				],
+			},
+		},
+	] as any;
+
+	const summary = generateChainStepSummary(entries, "review", 2);
+	assert.match(summary, /^Step 2 — review:/);
+	assert.match(summary, /Actions: read 1 file\(s\), modified src\/b\.ts, ran 1 command\(s\)\./);
+	assert.match(summary, /Outcome: Applied fixes\./);
+});
+
+test("generateChainStepSummary includes delegated custom-message data", () => {
+	const summary = generateChainStepSummary([delegatedEntry], "parallel(scan-fe, scan-be)", 1);
+	assert.match(summary, /^Step 1 — parallel\(scan-fe, scan-be\):/);
+	assert.match(summary, /Actions: modified src\/a\.ts\./);
+	assert.match(summary, /Outcome: Updated file\./);
+});
+
+test("generateChainStepSummary supports text-only steps without action lines", () => {
+	const entries = [
+		{
+			id: "msg-2",
+			type: "message",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "No edits required." }],
+			},
+		},
+	] as any;
+
+	const summary = generateChainStepSummary(entries, "summarize", 3);
+	assert.match(summary, /^Step 3 — summarize:/);
+	assert.doesNotMatch(summary, /^.*Actions:/m);
+	assert.match(summary, /Outcome: No edits required\./);
 });

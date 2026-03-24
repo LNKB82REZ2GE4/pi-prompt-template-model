@@ -7,6 +7,13 @@ interface DelegatedMessageDetails {
 	parallelResults?: Array<{ messages?: Message[] }>;
 }
 
+interface CollectedSummaryData {
+	filesRead: Set<string>;
+	filesWritten: Set<string>;
+	commandCount: number;
+	lastAssistantText: string;
+}
+
 function collectAssistantActions(messages: Message[], filesRead: Set<string>, filesWritten: Set<string>): { commandCount: number; lastText: string } {
 	let commandCount = 0;
 	let lastText = "";
@@ -39,7 +46,7 @@ function delegatedDetails(entry: SessionEntry): DelegatedMessageDetails | undefi
 	return entry.details as DelegatedMessageDetails;
 }
 
-export function generateIterationSummary(entries: SessionEntry[], task: string, iteration: number, totalIterations: number | null): string {
+function collectSummaryData(entries: SessionEntry[]): CollectedSummaryData {
 	const filesRead = new Set<string>();
 	const filesWritten = new Set<string>();
 	let commandCount = 0;
@@ -68,7 +75,18 @@ export function generateIterationSummary(entries: SessionEntry[], task: string, 
 		}
 	}
 
-	let summary = totalIterations !== null ? `[Loop iteration ${iteration}/${totalIterations}]\nTask: "${task}"` : `[Loop iteration ${iteration}]\nTask: "${task}"`;
+	return {
+		filesRead,
+		filesWritten,
+		commandCount,
+		lastAssistantText,
+	};
+}
+
+function formatSummary(header: string, entries: SessionEntry[]): string {
+	const { filesRead, filesWritten, commandCount, lastAssistantText } = collectSummaryData(entries);
+
+	let summary = header;
 
 	const actionParts: string[] = [];
 	if (filesRead.size > 0) actionParts.push(`read ${filesRead.size} file(s)`);
@@ -85,6 +103,17 @@ export function generateIterationSummary(entries: SessionEntry[], task: string, 
 	}
 
 	return summary;
+}
+
+export function generateIterationSummary(entries: SessionEntry[], task: string, iteration: number, totalIterations: number | null): string {
+	const header = totalIterations !== null
+		? `[Loop iteration ${iteration}/${totalIterations}]\nTask: "${task}"`
+		: `[Loop iteration ${iteration}]\nTask: "${task}"`;
+	return formatSummary(header, entries);
+}
+
+export function generateChainStepSummary(entries: SessionEntry[], stepLabel: string, stepNumber: number): string {
+	return formatSummary(`Step ${stepNumber} — ${stepLabel}:`, entries);
 }
 
 export function didIterationMakeChanges(entries: SessionEntry[]): boolean {

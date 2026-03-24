@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractLoopCount, extractLoopFlags, extractSubagentOverride, parseCommandArgs, substituteArgs } from "../args.js";
+import { extractChainContextFlag, extractLoopCount, extractLoopFlags, extractSubagentOverride, parseCommandArgs, substituteArgs } from "../args.js";
 
 test("parseCommandArgs respects quoted segments", () => {
 	assert.deepEqual(parseCommandArgs('alpha "two words" beta'), ["alpha", "two words", "beta"]);
@@ -168,6 +168,33 @@ test("extractLoopFlags handles newline-separated flags", () => {
 		args: "task",
 		fresh: true,
 		converge: false,
+	});
+});
+
+test("extractChainContextFlag strips bare --chain-context tokens", () => {
+	assert.deepEqual(extractChainContextFlag("task --chain-context"), {
+		args: "task",
+		chainContext: true,
+	});
+});
+
+test("extractChainContextFlag strips repeated flags", () => {
+	assert.deepEqual(extractChainContextFlag("--chain-context task --chain-context"), {
+		args: "task",
+		chainContext: true,
+	});
+});
+
+test("extractChainContextFlag preserves quoted flags", () => {
+	const extracted = extractChainContextFlag('"--chain-context" --chain-context task');
+	assert.equal(extracted.chainContext, true);
+	assert.deepEqual(parseCommandArgs(extracted.args), ["--chain-context", "task"]);
+});
+
+test("extractChainContextFlag composes with chain-style args and shared args separator", () => {
+	assert.deepEqual(extractChainContextFlag('analyze -> fix --chain-context -- "src/main.ts"'), {
+		args: 'analyze -> fix  -- "src/main.ts"',
+		chainContext: true,
 	});
 });
 

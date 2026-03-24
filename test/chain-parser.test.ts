@@ -60,3 +60,27 @@ test("parseChainSteps splits chain separators outside parallel() groups", () => 
 	]);
 	assert.deepEqual(parsed.sharedArgs, ["--global", "--flag"]);
 });
+
+test("parseChainDeclaration parses and strips per-step --with-context", () => {
+	const parsed = parseChainDeclaration("worker --with-context");
+	assert.deepEqual(parsed.invalidSegments, []);
+	assert.deepEqual(parsed.steps, [{ name: "worker", args: [], loopCount: undefined, withContext: true }]);
+});
+
+test("parseChainDeclaration strips repeated --with-context tokens", () => {
+	const parsed = parseChainDeclaration("worker --with-context --with-context");
+	assert.deepEqual(parsed.invalidSegments, []);
+	assert.deepEqual(parsed.steps, [{ name: "worker", args: [], loopCount: undefined, withContext: true }]);
+});
+
+test("parseChainDeclaration keeps quoted --with-context as a step arg", () => {
+	const parsed = parseChainDeclaration('worker "--with-context"');
+	assert.deepEqual(parsed.invalidSegments, []);
+	assert.deepEqual(parsed.steps, [{ name: "worker", args: ["--with-context"], loopCount: undefined }]);
+});
+
+test("parseChainDeclaration supports --with-context with per-step --loop", () => {
+	const parsed = parseChainDeclaration("worker --with-context --loop 2");
+	assert.deepEqual(parsed.invalidSegments, []);
+	assert.deepEqual(parsed.steps, [{ name: "worker", args: [], loopCount: 2, withContext: true }]);
+});

@@ -4,6 +4,11 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import promptModelExtension from "../index.js";
+import {
+	PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT,
+	PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT,
+	PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT,
+} from "../subagent-runtime.js";
 
 const MODEL_ID = "claude-sonnet-4-20250514";
 const ACTIVE_MODEL = { provider: "anthropic", id: MODEL_ID };
@@ -185,6 +190,138 @@ function createContext(
 		getNavigateCount: () => navigateCount,
 		getNotifications: () => notifications,
 	};
+}
+
+function createBranchingContext(
+	cwd: string,
+	pi: FakePi,
+	models: Array<{ provider: string; id: string }> = [ACTIVE_MODEL],
+	initialEntries: any[] = [{ id: "root", type: "message", message: { role: "user", content: [{ type: "text", text: "start" }] } }],
+) {
+	const branch = [...initialEntries];
+	const notifications: string[] = [];
+	let navigateCount = 0;
+	let entryCounter = 0;
+	const queuedAssistantEntries: Array<Array<{ type: string; [key: string]: unknown }>> = [];
+	const nextId = (prefix: string) => `${prefix}-${++entryCounter}`;
+
+	const modelRegistry = {
+		find(provider: string, modelId: string) {
+			return models.find((model) => model.provider === provider && model.id === modelId);
+		},
+		getAll() {
+			return models;
+		},
+		getAvailable() {
+			return models;
+		},
+		async getApiKey() {
+			return "token";
+		},
+		isUsingOAuth() {
+			return false;
+		},
+	};
+
+	pi.sendUserMessage = (content: string) => {
+		pi.userMessages.push(content);
+		branch.push({
+			id: nextId("user"),
+			type: "message",
+			message: {
+				role: "user",
+				content: [{ type: "text", text: content }],
+			},
+		});
+	};
+
+	pi.sendMessage = (message: any) => {
+		branch.push({
+			id: nextId("custom"),
+			type: "custom_message",
+			customType: message.customType,
+			content: message.content,
+			display: message.display,
+			details: message.details,
+		});
+	};
+
+	const ctx = {
+		cwd,
+		get model() {
+			return pi.currentModel;
+		},
+		modelRegistry,
+		hasUI: false,
+		ui: {
+			notify(message: string) {
+				notifications.push(message);
+			},
+			setStatus() {},
+			theme: {
+				fg(_token: string, text: string) {
+					return text;
+				},
+			},
+		},
+		isIdle() {
+			return false;
+		},
+		async waitForIdle() {
+			const nextAssistant = queuedAssistantEntries.shift();
+			if (!nextAssistant) return;
+			branch.push({
+				id: nextId("assistant"),
+				type: "message",
+				message: {
+					role: "assistant",
+					content: nextAssistant,
+				},
+			});
+		},
+		sessionManager: {
+			getLeafId() {
+				return branch[branch.length - 1]?.id ?? null;
+			},
+			getBranch() {
+				return branch;
+			},
+		},
+		async navigateTree() {
+			navigateCount++;
+			return { cancelled: false };
+		},
+	};
+
+	return {
+		ctx,
+		branch,
+		queueAssistantText(text: string) {
+			queuedAssistantEntries.push([{ type: "text", text }]);
+		},
+		queueAssistantContent(content: Array<{ type: string; [key: string]: unknown }>) {
+			queuedAssistantEntries.push(content);
+		},
+		getNavigateCount: () => navigateCount,
+		getNotifications: () => notifications,
+	};
+}
+
+async function withSubagentRuntime(root: string, run: () => Promise<void>) {
+	const runtimeRoot = join(root, "runtime-subagent");
+	mkdirSync(runtimeRoot, { recursive: true });
+	writeFileSync(
+		join(runtimeRoot, "agents.js"),
+		"export function discoverAgents(){ return { agents: [{ name: 'delegate' }, { name: 'reviewer' }, { name: 'worker' }] }; }",
+	);
+	const previousRuntime = process.env.PI_SUBAGENT_RUNTIME_ROOT;
+	process.env.PI_SUBAGENT_RUNTIME_ROOT = runtimeRoot;
+	try {
+		await run();
+	} finally {
+		if (previousRuntime === undefined) delete process.env.PI_SUBAGENT_RUNTIME_ROOT;
+		else process.env.PI_SUBAGENT_RUNTIME_ROOT = previousRuntime;
+	}
 }
 
 test("bare --loop forces convergence on and ignores --no-converge", async () => {
@@ -1134,5 +1271,301 @@ test("session switch clears pending restore state", async () => {
 		await pi.emit("session_switch", {}, ctx);
 		await pi.emit("agent_end", {}, ctx);
 		assert.deepEqual(pi.setModelCalls, ["anthropic/target-model"]);
+	});
+});
+
+test("chain template chainContext summary prepends previous-step summary to second delegated step", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: analyze -> fix\nchainContext: summary\n---\nignored');
+			writeFileSync(join(cwd, ".pi", "prompts", "analyze.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nANALYZE`);
+			writeFileSync(join(cwd, ".pi", "prompts", "fix.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nFIX`);
+
+			const pi = new FakePi();
+			const { ctx } = createBranchingContext(cwd, pi);
+			promptModelExtension(pi as never);
+			await pi.emit("session_start", {}, ctx);
+
+			const tasks: string[] = [];
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				tasks.push(request.task);
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [{ role: "assistant", content: [{ type: "text", text: `done ${tasks.length}` }] }],
+					isError: false,
+				});
+			});
+
+			await pi.commands.get("pipeline")!.handler("", ctx);
+			assert.equal(tasks.length, 2);
+			assert.match(tasks[1] ?? "", /^\[Previous chain steps\]\n\nStep 1 — analyze:/);
+		});
+	});
+});
+
+test("chain-prompts --chain-context prepends previous-step summary to second delegated step", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "analyze.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nANALYZE`);
+			writeFileSync(join(cwd, ".pi", "prompts", "fix.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nFIX`);
+
+			const pi = new FakePi();
+			const { ctx } = createBranchingContext(cwd, pi);
+			promptModelExtension(pi as never);
+			await pi.emit("session_start", {}, ctx);
+
+			const tasks: string[] = [];
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				tasks.push(request.task);
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [{ role: "assistant", content: [{ type: "text", text: `done ${tasks.length}` }] }],
+					isError: false,
+				});
+			});
+
+			await pi.commands.get("chain-prompts")!.handler("analyze -> fix --chain-context", ctx);
+			assert.equal(tasks.length, 2);
+			assert.match(tasks[1] ?? "", /^\[Previous chain steps\]\n\nStep 1 — analyze:/);
+		});
+	});
+});
+
+test("per-step --with-context only affects that delegated step", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "one.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nONE`);
+			writeFileSync(join(cwd, ".pi", "prompts", "two.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nTWO`);
+			writeFileSync(join(cwd, ".pi", "prompts", "three.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nTHREE`);
+
+			const pi = new FakePi();
+			const { ctx } = createBranchingContext(cwd, pi);
+			promptModelExtension(pi as never);
+			await pi.emit("session_start", {}, ctx);
+
+			const tasks: string[] = [];
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				tasks.push(request.task);
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [{ role: "assistant", content: [{ type: "text", text: `done ${tasks.length}` }] }],
+					isError: false,
+				});
+			});
+
+			await pi.commands.get("chain-prompts")!.handler("one -> two --with-context -> three", ctx);
+			assert.equal(tasks.length, 3);
+			assert.match(tasks[1] ?? "", /^\[Previous chain steps\]\n\nStep 1 — one:/);
+			assert.doesNotMatch(tasks[2] ?? "", /^\[Previous chain steps\]/);
+		});
+	});
+});
+
+test("first delegated chain step never receives a summary preamble", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "analyze.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nANALYZE`);
+			writeFileSync(join(cwd, ".pi", "prompts", "fix.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nFIX`);
+
+			const pi = new FakePi();
+			const { ctx } = createBranchingContext(cwd, pi);
+			promptModelExtension(pi as never);
+			await pi.emit("session_start", {}, ctx);
+
+			const tasks: string[] = [];
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				tasks.push(request.task);
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [{ role: "assistant", content: [{ type: "text", text: `done ${tasks.length}` }] }],
+					isError: false,
+				});
+			});
+
+			await pi.commands.get("chain-prompts")!.handler("analyze -> fix --chain-context", ctx);
+			assert.doesNotMatch(tasks[0] ?? "", /^\[Previous chain steps\]/);
+		});
+	});
+});
+
+test("non-delegated steps do not receive summary preambles with chain context enabled", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "scan.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN`);
+			writeFileSync(join(cwd, ".pi", "prompts", "review.md"), `---\nmodel: ${MODEL_ID}\n---\nREVIEW`);
+
+			const pi = new FakePi();
+			const { ctx, queueAssistantText } = createBranchingContext(cwd, pi);
+			promptModelExtension(pi as never);
+			await pi.emit("session_start", {}, ctx);
+
+			queueAssistantText("review done");
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [{ role: "assistant", content: [{ type: "text", text: "scan done" }] }],
+					isError: false,
+				});
+			});
+
+			await pi.commands.get("chain-prompts")!.handler("scan -> review --chain-context", ctx);
+			assert.deepEqual(pi.userMessages, ["REVIEW"]);
+		});
+	});
+});
+
+test("delegated inheritContext chain steps skip summary preambles", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "scan.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN`);
+			writeFileSync(join(cwd, ".pi", "prompts", "fix.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\ninheritContext: true\n---\nFIX`);
+
+			const pi = new FakePi();
+			const { ctx } = createBranchingContext(cwd, pi);
+			promptModelExtension(pi as never);
+			await pi.emit("session_start", {}, ctx);
+
+			const tasks: string[] = [];
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				tasks.push(request.task);
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+					isError: false,
+				});
+			});
+
+			await pi.commands.get("chain-prompts")!.handler("scan -> fix --chain-context", ctx);
+			assert.equal(tasks[1], "FIX");
+		});
+	});
+});
+
+test("per-step loops contribute one combined step summary to the next step", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "worker --loop 2 -> follow"\nchainContext: summary\n---\nignored');
+			writeFileSync(join(cwd, ".pi", "prompts", "worker.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nWORKER`);
+			writeFileSync(join(cwd, ".pi", "prompts", "follow.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nFOLLOW`);
+
+			const pi = new FakePi();
+			const { ctx } = createBranchingContext(cwd, pi);
+			promptModelExtension(pi as never);
+			await pi.emit("session_start", {}, ctx);
+
+			let delegatedCount = 0;
+			const tasks: string[] = [];
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				delegatedCount++;
+				tasks.push(request.task);
+				const messages = delegatedCount <= 2
+					? [
+						{
+							role: "assistant",
+							content: [
+								{ type: "toolCall", id: "w", name: "write", arguments: { path: `file-${delegatedCount}.ts` } },
+								{ type: "text", text: `worker ${delegatedCount}` },
+							],
+						},
+					]
+					: [{ role: "assistant", content: [{ type: "text", text: "follow" }] }];
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages,
+					isError: false,
+				});
+			});
+
+			await pi.commands.get("pipeline")!.handler("", ctx);
+			assert.equal(tasks.length, 3);
+			const followTask = tasks[2] ?? "";
+			assert.match(followTask, /^\[Previous chain steps\]\n\nStep 1 — worker:/);
+			assert.equal((followTask.match(/Step 1 — worker:/g) ?? []).length, 1);
+		});
+	});
+});
+
+test("outer chain loop iterations reset summary scope", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(
+				join(cwd, ".pi", "prompts", "pipeline.md"),
+				'---\nchain: first -> second\nchainContext: summary\nloop: 2\nconverge: false\n---\nignored',
+			);
+			writeFileSync(join(cwd, ".pi", "prompts", "first.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nFIRST`);
+			writeFileSync(join(cwd, ".pi", "prompts", "second.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSECOND`);
+
+			const pi = new FakePi();
+			const { ctx } = createBranchingContext(cwd, pi);
+			promptModelExtension(pi as never);
+			await pi.emit("session_start", {}, ctx);
+
+			const tasks: string[] = [];
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				tasks.push(request.task);
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [{ role: "assistant", content: [{ type: "text", text: `done ${tasks.length}` }] }],
+					isError: false,
+				});
+			});
+
+			await pi.commands.get("pipeline")!.handler("", ctx);
+			assert.equal(tasks.length, 4);
+			assert.doesNotMatch(tasks[0] ?? "", /^\[Previous chain steps\]/);
+			assert.match(tasks[1] ?? "", /^\[Previous chain steps\]/);
+			assert.doesNotMatch(tasks[2] ?? "", /^\[Previous chain steps\]/);
+			assert.match(tasks[3] ?? "", /^\[Previous chain steps\]/);
+		});
+	});
+});
+
+test("parallel(scan-fe --with-context) is rejected by chain validation", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(scan-fe --with-context) -> review"\n---\nignored');
+		writeFileSync(join(cwd, ".pi", "prompts", "scan-fe.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nscan`);
+		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nreview`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("pipeline")!.handler("", ctx);
+		assert.match(getNotifications().join("\n"), /Step "scan-fe" in parallel\(\) does not support per-task --with-context\./);
 	});
 });

@@ -87,8 +87,33 @@ function withTempHome(run: (root: string) => Promise<void>) {
 	});
 }
 
-function createContext(cwd: string) {
+function createContext(cwd: string, pi: FakePi) {
 	const branch: any[] = [{ id: "root", type: "message", message: { role: "user", content: [{ type: "text", text: "start" }] } }];
+	let entryCount = 0;
+	const nextId = (prefix: string) => `${prefix}-${++entryCount}`;
+	pi.sendUserMessage = (content: string) => {
+		pi.userMessages.push(content);
+		branch.push({
+			id: nextId("user"),
+			type: "message",
+			message: {
+				role: "user",
+				content: [{ type: "text", text: content }],
+			},
+		});
+	};
+	pi.sendMessage = (message: any) => {
+		pi.customMessages.push(message);
+		branch.push({
+			id: nextId("custom"),
+			type: "custom_message",
+			customType: message.customType,
+			content: message.content,
+			display: message.display,
+			details: message.details,
+		});
+	};
+
 	return {
 		ctx: {
 			cwd,
@@ -150,7 +175,7 @@ test("delegated prompt uses event bus and does not switch parent model", async (
 		writeFileSync(join(cwd, ".pi", "prompts", "simplify.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: true\n---\nwork");
 
 		const pi = new FakePi();
-		const { ctx } = createContext(cwd);
+		const { ctx } = createContext(cwd, pi);
 		promptModelExtension(pi as never);
 		await pi.emit("session_start", {}, ctx);
 		respondWithDelegatedResult(pi, (request) => {
@@ -171,7 +196,7 @@ test("runtime --subagent override takes precedence", async () => {
 		writeFileSync(join(cwd, ".pi", "prompts", "simplify.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: worker\n---\nwork");
 
 		const pi = new FakePi();
-		const { ctx } = createContext(cwd);
+		const { ctx } = createContext(cwd, pi);
 		promptModelExtension(pi as never);
 		await pi.emit("session_start", {}, ctx);
 		respondWithDelegatedResult(pi, (request) => {
@@ -192,7 +217,7 @@ test("inheritContext delegated prompts request fork context", async () => {
 		);
 
 		const pi = new FakePi();
-		const { ctx } = createContext(cwd);
+		const { ctx } = createContext(cwd, pi);
 		promptModelExtension(pi as never);
 		await pi.emit("session_start", {}, ctx);
 		respondWithDelegatedResult(pi, (request) => {
@@ -210,7 +235,7 @@ test("delegated loops converge from delegated write/no-write changes", async () 
 		writeFileSync(join(cwd, ".pi", "prompts", "simplify.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: true\n---\nwork");
 
 		const pi = new FakePi();
-		const { ctx } = createContext(cwd);
+		const { ctx } = createContext(cwd, pi);
 		promptModelExtension(pi as never);
 		await pi.emit("session_start", {}, ctx);
 
@@ -245,7 +270,7 @@ test("queued run-prompt executes delegated commands", async () => {
 		writeFileSync(join(cwd, ".pi", "prompts", "simplify.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: true\n---\nwork");
 
 		const pi = new FakePi();
-		const { ctx } = createContext(cwd);
+		const { ctx } = createContext(cwd, pi);
 		promptModelExtension(pi as never);
 		await pi.emit("session_start", {}, ctx);
 		respondWithDelegatedResult(pi);
@@ -267,7 +292,7 @@ test("parallel chain step delegates with tasks payload", async () => {
 		writeFileSync(join(cwd, ".pi", "prompts", "scan-be.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: reviewer\n---\nscan be");
 
 		const pi = new FakePi();
-		const { ctx } = createContext(cwd);
+		const { ctx } = createContext(cwd, pi);
 		promptModelExtension(pi as never);
 		await pi.emit("session_start", {}, ctx);
 
@@ -318,7 +343,7 @@ test("parallel chain task failure aborts remaining chain steps", async () => {
 		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nreview");
 
 		const pi = new FakePi();
-		const { ctx } = createContext(cwd);
+		const { ctx } = createContext(cwd, pi);
 		promptModelExtension(pi as never);
 		await pi.emit("session_start", {}, ctx);
 
@@ -358,7 +383,7 @@ test("successful parallel step continues to next sequential step", async () => {
 		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nreview findings");
 
 		const pi = new FakePi();
-		const { ctx } = createContext(cwd);
+		const { ctx } = createContext(cwd, pi);
 		promptModelExtension(pi as never);
 		await pi.emit("session_start", {}, ctx);
 
@@ -386,6 +411,50 @@ test("successful parallel step continues to next sequential step", async () => {
 	});
 });
 
+test("parallel delegated step summaries are passed to the next delegated sequential step", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(scan-fe, scan-be) -> review"\nchainContext: summary\n---\nignored');
+		writeFileSync(join(cwd, ".pi", "prompts", "scan-fe.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: true\n---\nscan fe");
+		writeFileSync(join(cwd, ".pi", "prompts", "scan-be.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: true\n---\nscan be");
+		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: true\n---\nreview findings");
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		const delegatedTasks: string[] = [];
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+			const request = payload as any;
+			delegatedTasks.push(request.task);
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			if (request.tasks) {
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [],
+					parallelResults: [
+						{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "fe done" }] }], isError: false },
+						{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "be done" }] }], isError: false },
+					],
+					isError: false,
+				});
+				return;
+			}
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [{ role: "assistant", content: [{ type: "text", text: "review done" }] }],
+				isError: false,
+			});
+		});
+
+		await pi.commands.get("pipeline")!.handler("", ctx);
+		assert.equal(delegatedTasks.length, 2);
+		assert.match(delegatedTasks[1] ?? "", /^\[Previous chain steps\]\n\nStep 1 — parallel\(scan-fe, scan-be\):/);
+	});
+});
+
 test("chain-prompts CLI command handles parallel() syntax", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");
@@ -394,7 +463,7 @@ test("chain-prompts CLI command handles parallel() syntax", async () => {
 		writeFileSync(join(cwd, ".pi", "prompts", "scan-be.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: true\n---\nscan be");
 
 		const pi = new FakePi();
-		const { ctx } = createContext(cwd);
+		const { ctx } = createContext(cwd, pi);
 		promptModelExtension(pi as never);
 		await pi.emit("session_start", {}, ctx);
 

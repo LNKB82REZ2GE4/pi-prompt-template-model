@@ -38,6 +38,7 @@ export interface PromptWithModel {
 	content: string;
 	models: string[];
 	chain?: string;
+	chainContext?: "summary";
 	restore: boolean;
 	skill?: string;
 	thinking?: ThinkingLevel;
@@ -432,6 +433,29 @@ function normalizeChain(
 	return undefined;
 }
 
+function normalizeChainContext(
+	value: unknown,
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): "summary" | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value === "string") {
+		const normalized = value.trim().toLowerCase();
+		if (normalized === "summary") return "summary";
+	}
+
+	diagnostics.push(
+		createDiagnostic(
+			"invalid-chain-context",
+			filePath,
+			source,
+			`Ignoring invalid chainContext value in ${filePath}: frontmatter field "chainContext" must be "summary".`,
+		),
+	);
+	return undefined;
+}
+
 function normalizeThinking(
 	value: unknown,
 	filePath: string,
@@ -542,6 +566,7 @@ function loadPromptsWithModelFromDir(
 				if (!frontmatter) continue;
 				const { body } = parsed;
 				const chain = normalizeChain(frontmatter.chain, fullPath, source, diagnostics);
+				const chainContext = chain ? normalizeChainContext(frontmatter.chainContext, fullPath, source, diagnostics) : undefined;
 				if (chain && /\bparallel\s*\(/.test(chain)) {
 					const parsedChain = parseChainDeclaration(chain);
 					if (parsedChain.invalidSegments.length > 0 || parsedChain.steps.length === 0) {
@@ -637,6 +662,7 @@ function loadPromptsWithModelFromDir(
 					content: body,
 					models,
 					chain: chain || undefined,
+					chainContext,
 					restore,
 					skill,
 					thinking,
@@ -721,8 +747,9 @@ export function loadPromptsWithModel(cwd: string): LoadPromptsWithModelResult {
 export function buildPromptCommandDescription(prompt: PromptWithModel): string {
 	const sourceLabel = prompt.subdir ? `(${prompt.source}:${prompt.subdir})` : `(${prompt.source})`;
 	if (prompt.chain) {
+		const chainContextLabel = prompt.chainContext ? ` ${prompt.chainContext}` : "";
 		const cwdLabel = prompt.cwd ? ` cwd:${prompt.cwd}` : "";
-		const details = `[chain: ${prompt.chain}${cwdLabel}] ${sourceLabel}`;
+		const details = `[chain: ${prompt.chain}${chainContextLabel}${cwdLabel}] ${sourceLabel}`;
 		return prompt.description ? `${prompt.description} ${details}` : details;
 	}
 	const modelLabel = prompt.models.length > 0 ? prompt.models.map((model) => model.split("/").pop() || model).join("|") : "current";

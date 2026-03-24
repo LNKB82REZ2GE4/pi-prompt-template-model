@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-03-24
+
+### Added
+- Added delegated chain-step context summaries via `chainContext: summary` (chain frontmatter), `/chain-prompts ... --chain-context` (command-level), and per-step `--with-context` (single delegated chain steps).
+
 ## [0.6.4] - 2026-03-23
 
 ### Fixed

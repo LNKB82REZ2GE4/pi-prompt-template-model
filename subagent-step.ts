@@ -38,6 +38,7 @@ interface DelegatedPromptBaseOptions {
 	override?: SubagentOverride;
 	signal?: AbortSignal;
 	inheritedModel?: Model<any>;
+	taskPreamble?: string;
 }
 
 interface DelegatedSinglePromptOptions extends DelegatedPromptBaseOptions {
@@ -156,6 +157,7 @@ async function prepareDelegatedTask(
 	currentModel: Model<any> | undefined,
 	override: SubagentOverride | undefined,
 	inheritedModel: Model<any> | undefined,
+	taskPreamble: string | undefined,
 	runtime: Awaited<ReturnType<typeof ensureSubagentRuntime>>,
 ): Promise<PreparedDelegatedTask> {
 	const requestedAgent = resolveDelegationName(task.prompt, override);
@@ -183,11 +185,15 @@ async function prepareDelegatedTask(
 	if (effectiveCwd !== ctx.cwd && !existsSync(effectiveCwd)) {
 		throw new Error(`cwd directory does not exist: ${effectiveCwd}`);
 	}
+	let taskText = prepared.content;
+	if (!task.prompt.inheritContext && taskPreamble) {
+		taskText = `${taskPreamble}\n\n---\n\n${prepared.content}`;
+	}
 
 	return {
 		promptName: task.prompt.name,
 		agent,
-		task: prepared.content,
+		task: taskText,
 		context: task.prompt.inheritContext ? "fork" : "fresh",
 		model: `${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`,
 		cwd: effectiveCwd,
@@ -429,7 +435,7 @@ async function requestDelegatedRun(
 }
 
 export async function executeSubagentPromptStep(options: DelegatedPromptOptions): Promise<DelegatedPromptOutcome | undefined> {
-	const { pi, ctx, currentModel, override, signal, inheritedModel } = options;
+	const { pi, ctx, currentModel, override, signal, inheritedModel, taskPreamble } = options;
 	const runtime = await ensureSubagentRuntime(ctx.cwd);
 	const isParallelRequest = "parallel" in options;
 
@@ -440,7 +446,7 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 
 	const preparedTasks: PreparedDelegatedTask[] = [];
 	for (const task of tasks) {
-		const preparedTask = await prepareDelegatedTask(task, ctx, currentModel, override, inheritedModel, runtime);
+		const preparedTask = await prepareDelegatedTask(task, ctx, currentModel, override, inheritedModel, taskPreamble, runtime);
 		preparedTasks.push(preparedTask);
 	}
 

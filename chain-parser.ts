@@ -4,6 +4,7 @@ export interface ChainStep {
 	name: string;
 	args: string[];
 	loopCount?: number;
+	withContext?: boolean;
 }
 
 export interface ParallelChainStep {
@@ -80,14 +81,22 @@ function scanSegmentTokens(segment: string): SegmentToken[] {
 	return tokens;
 }
 
-function extractStepLoopCount(segment: string): { cleanedSegment: string; loopCount?: number } {
+function extractStepFlags(segment: string): { cleanedSegment: string; loopCount?: number; withContext: boolean } {
 	const tokens = scanSegmentTokens(segment);
 	const loopTokenRanges: Array<{ start: number; end: number }> = [];
+	const withContextTokenRanges: Array<{ start: number; end: number }> = [];
 	let loopCount: number | undefined;
+	let withContext = false;
 
 	for (let i = 1; i < tokens.length; i++) {
 		const token = tokens[i];
 		if (token.quoted) continue;
+
+		if (token.value === "--with-context") {
+			withContext = true;
+			withContextTokenRanges.push({ start: token.start, end: token.end });
+			continue;
+		}
 
 		if (token.value.startsWith("--loop=")) {
 			loopTokenRanges.push({ start: token.start, end: token.end });
@@ -114,17 +123,18 @@ function extractStepLoopCount(segment: string): { cleanedSegment: string; loopCo
 		}
 	}
 
-	if (loopCount === undefined || loopTokenRanges.length === 0) {
-		return { cleanedSegment: segment };
+	const loopRangesToRemove = loopCount !== undefined ? loopTokenRanges : [];
+	if (loopRangesToRemove.length === 0 && withContextTokenRanges.length === 0) {
+		return { cleanedSegment: segment, withContext: false };
 	}
 
-	loopTokenRanges.sort((a, b) => b.start - a.start);
+	const rangesToRemove = [...loopRangesToRemove, ...withContextTokenRanges].sort((a, b) => b.start - a.start);
 	let cleanedSegment = segment;
-	for (const { start, end } of loopTokenRanges) {
+	for (const { start, end } of rangesToRemove) {
 		cleanedSegment = `${cleanedSegment.slice(0, start)}${cleanedSegment.slice(end)}`;
 	}
 
-	return { cleanedSegment: cleanedSegment.trim(), loopCount };
+	return { cleanedSegment: cleanedSegment.trim(), loopCount, withContext };
 }
 
 function splitByTopLevelSeparator(input: string, separator: string): string[] {
@@ -192,10 +202,10 @@ function findMatchingParen(segment: string, openIndex: number): number {
 }
 
 function parseSingleStepSegment(segment: string): ChainStep | undefined {
-	const { cleanedSegment, loopCount } = extractStepLoopCount(segment);
+	const { cleanedSegment, loopCount, withContext } = extractStepFlags(segment);
 	const tokens = parseCommandArgs(cleanedSegment);
 	if (tokens.length === 0) return undefined;
-	return { name: tokens[0], args: tokens.slice(1), loopCount };
+	return { name: tokens[0], args: tokens.slice(1), loopCount, ...(withContext ? { withContext: true } : {}) };
 }
 
 function parseParallelStepSegment(segment: string): ParallelChainStep | undefined {

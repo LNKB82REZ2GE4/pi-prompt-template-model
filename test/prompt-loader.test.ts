@@ -344,6 +344,55 @@ test("loadPromptsWithModel stores loop/fresh/converge frontmatter on chain templ
 	});
 });
 
+test("loadPromptsWithModel stores chainContext summary on chain templates", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "chain-context.md"),
+			'---\nchain: "analyze -> fix"\nchainContext: summary\n---\nignored',
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("chain-context");
+		assert.ok(prompt);
+		assert.equal(prompt.chainContext, "summary");
+	});
+});
+
+test("loadPromptsWithModel diagnoses invalid chainContext on chain templates", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "chain-context-invalid.md"),
+			'---\nchain: "analyze -> fix"\nchainContext: full\n---\nignored',
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("chain-context-invalid");
+		assert.ok(prompt);
+		assert.equal(prompt.chainContext, undefined);
+		assert.match(result.diagnostics.map((item) => item.message).join("\n"), /frontmatter field "chainContext" must be "summary"/i);
+	});
+});
+
+test("buildPromptCommandDescription includes chain summary context label", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "chain-context-description.md"),
+			'---\nchain: "analyze -> fix"\nchainContext: summary\n---\nignored',
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("chain-context-description");
+		assert.ok(prompt);
+		assert.equal(buildPromptCommandDescription(prompt), "[chain: analyze -> fix summary] (project)");
+	});
+});
+
 test("loadPromptsWithModel diagnoses invalid chain frontmatter values", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");

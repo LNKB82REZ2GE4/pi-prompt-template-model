@@ -61,10 +61,10 @@ export function createToolManager(pi: ExtensionAPI, deps: ToolManagerDeps) {
 				"Supports --loop for loops (e.g. 'deslop --loop 5', 'deslop --loop=5', 'deslop --loop' for unlimited until convergence with a 50-iteration cap), " +
 				"--fresh for context collapse between iterations, and --no-converge to disable early stopping for bounded loops. " +
 				"Supports runtime delegation override via --subagent, --subagent=<name>, or --subagent:<name>. " +
-				"Use 'chain-prompts template1 -> template2' for chaining.",
+				"Use 'chain-prompts template1 -> template2' for chaining and add --chain-context to pass previous step summaries into delegated steps.",
 			parameters: Type.Object({
 				command: Type.String({
-					description: "Template name and arguments (e.g. 'deslop --loop 5 --fresh', 'deslop --subagent:worker', 'deslop --subagent', 'chain-prompts analyze -> fix --loop=3')",
+					description: "Template name and arguments (e.g. 'deslop --loop 5 --fresh', 'deslop --subagent:worker', 'deslop --subagent', 'chain-prompts analyze -> fix --chain-context', 'chain-prompts analyze -> fix --loop=3')",
 				}),
 			}),
 			execute: async (_id, params) => {

@@ -479,3 +479,128 @@ test("executeSubagentPromptStep fails on parallel task errors", async () => {
 		);
 	});
 });
+
+test("executeSubagentPromptStep prepends taskPreamble for delegated single tasks", async () => {
+	await withRuntime(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		let delegatedTask = "";
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const request = data as any;
+			delegatedTask = request.task;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
+				isError: false,
+			});
+		});
+
+		await executeSubagentPromptStep({
+			pi,
+			prompt,
+			args: [],
+			ctx,
+			currentModel: ctx.model,
+			taskPreamble: "[Previous chain steps]\n\nStep 1 — analyze:\nOutcome: done",
+		});
+
+		assert.equal(delegatedTask, "[Previous chain steps]\n\nStep 1 — analyze:\nOutcome: done\n\n---\n\ndo work");
+	});
+});
+
+test("executeSubagentPromptStep prepends taskPreamble for every delegated parallel task", async () => {
+	await withRuntime(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		let delegatedTasks: string[] = [];
+
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const request = data as any;
+			delegatedTasks = (request.tasks ?? []).map((task: { task: string }) => task.task);
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [],
+				parallelResults: [
+					{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "A" }] }], isError: false },
+					{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "B" }] }], isError: false },
+				],
+				isError: false,
+			});
+		});
+
+		await executeSubagentPromptStep({
+			pi,
+			parallel: [
+				{ prompt, args: [] },
+				{ prompt: { ...prompt, name: "review", subagent: "reviewer" }, args: [] },
+			],
+			ctx,
+			currentModel: ctx.model,
+			taskPreamble: "[Previous chain steps]\n\nStep 1 — scan:\nOutcome: done",
+		});
+
+		assert.deepEqual(delegatedTasks, [
+			"[Previous chain steps]\n\nStep 1 — scan:\nOutcome: done\n\n---\n\ndo work",
+			"[Previous chain steps]\n\nStep 1 — scan:\nOutcome: done\n\n---\n\ndo work",
+		]);
+	});
+});
+
+test("executeSubagentPromptStep ignores taskPreamble when inheritContext is true", async () => {
+	await withRuntime(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		let delegatedTask = "";
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const request = data as any;
+			delegatedTask = request.task;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
+				isError: false,
+			});
+		});
+
+		await executeSubagentPromptStep({
+			pi,
+			prompt: { ...prompt, inheritContext: true },
+			args: [],
+			ctx,
+			currentModel: ctx.model,
+			taskPreamble: "[Previous chain steps]\n\nStep 1 — analyze:\nOutcome: done",
+		});
+
+		assert.equal(delegatedTask, "do work");
+	});
+});
+
+test("executeSubagentPromptStep keeps task unchanged when taskPreamble is omitted", async () => {
+	await withRuntime(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		let delegatedTask = "";
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const request = data as any;
+			delegatedTask = request.task;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
+				isError: false,
+			});
+		});
+
+		await executeSubagentPromptStep({
+			pi,
+			prompt,
+			args: [],
+			ctx,
+			currentModel: ctx.model,
+		});
+
+		assert.equal(delegatedTask, "do work");
+	});
+});
